@@ -10,3 +10,6 @@ services:
         value: 10000
       - key: PYTHON_VERSION
         value: 3.11.0
+      # Decommentez et modifiez cette ligne si vous changez de bot token
+      # - key: TELEGRAM_BOT_TOKEN
+      #   value: VOTRE_NOUVEAU_TOKEN_ICI

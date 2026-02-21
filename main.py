@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bot Telegram de Prédiction - Déployable sur Render.com
+Bot Telegram de Prediction - Deployable sur Render.com
 Tout-en-un : bot + serveur web + commandes admin
 Port: 10000
 """
@@ -28,19 +28,18 @@ from config import (
 
 # Variables globales
 bot_client = None
-admin_client = None
-last_prediction = None  # Pour suivre la dernière prédiction faite
+last_prediction = None
 
 # =====================================================
 # PARTIE 1 : SERVEUR WEB MINIMAL (pour Render.com)
 # =====================================================
 
 async def handle_health(request):
-    """Endpoint de santé pour Render.com"""
+    """Endpoint de sante pour Render.com"""
     return web.Response(text="Bot is running!", status=200)
 
 async def start_web_server():
-    """Démarre le serveur web sur le port 10000"""
+    """Demarre le serveur web sur le port 10000"""
     app = web.Application()
     app.router.add_get('/', handle_health)
     app.router.add_get('/health', handle_health)
@@ -50,7 +49,7 @@ async def start_web_server():
 
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    logger.info(f"🌐 Serveur web démarré sur le port {PORT}")
+    logger.info(f"🌐 Serveur web demarre sur le port {PORT}")
     return runner
 
 # =====================================================
@@ -59,29 +58,29 @@ async def start_web_server():
 
 def get_prediction(number):
     """
-    Retourne la prédiction pour un numéro donné
-    Règle: 
-    - Si numéro impair reçu -> prédit avec cycle pair
-    - Si numéro pair reçu -> prédit avec cycle impair
-    - Si numéro exclu -> retourne None (pas de prédiction)
+    Retourne la prediction pour un numero donne
+    Regle: 
+    - Si numero impair recu -> predit avec cycle pair
+    - Si numero pair recu -> predit avec cycle impair
+    - Si numero exclu -> retourne None (pas de prediction)
     """
     if number in EXCLUDED_NUMBERS:
         return None
     return PREDICTION_MAP.get(number)
 
 def format_prediction_message(number, suit, is_excluded=False):
-    """Formate le message de prédiction"""
+    """Formate le message de prediction"""
     if is_excluded:
-        return f"🚫 Numéro {number} exclu - Aucune prédiction"
+        return f"🚫 Numero {number} exclu - Aucune prediction"
 
     parite = "impair" if number % 2 == 1 else "pair"
     cycle_used = "pair" if number % 2 == 1 else "impair"
 
-    return f"""🎯 PRÉDICTION
+    return f"""🎯 PREDICTION
 
-📥 Numéro reçu: {number} ({parite})
-🎴 Costume prédit: {suit}
-📊 Cycle utilisé: {cycle_used}
+📥 Numero recu: {number} ({parite})
+🎴 Costume predit: {suit}
+📊 Cycle utilise: {cycle_used}
 ⏰ {datetime.now().strftime('%H:%M:%S')}"""
 
 # =====================================================
@@ -89,7 +88,7 @@ def format_prediction_message(number, suit, is_excluded=False):
 # =====================================================
 
 async def handle_admin_commands(event):
-    """Gère les commandes admin"""
+    """Gere les commandes admin"""
     global bot_client
 
     if event.sender_id != ADMIN_ID:
@@ -101,26 +100,26 @@ async def handle_admin_commands(event):
 
     try:
         if command == '/start':
-            await event.reply("""🤖 Bot de Prédiction Actif
+            await event.reply("""🤖 Bot de Prediction Actif
 
 Commandes disponibles:
-/test <numero> - Tester une prédiction
+/test <numero> - Tester une prediction
 /info - Voir les infos du bot
 /stats - Statistiques
-/restart - Redémarrer le bot""")
+/restart - Redemarrer le bot""")
 
         elif command == '/test' and len(parts) > 1:
             try:
                 num = int(parts[1])
                 if num in EXCLUDED_NUMBERS:
-                    await event.reply(f"🚫 {num} est un numéro EXCLU")
+                    await event.reply(f"🚫 {num} est un numero EXCLU")
                 else:
                     suit = get_prediction(num)
                     if suit:
                         msg = format_prediction_message(num, suit)
                         await event.reply(msg)
                     else:
-                        await event.reply(f"❌ Numéro {num} non trouvé dans la map")
+                        await event.reply(f"❌ Numero {num} non trouve dans la map")
             except ValueError:
                 await event.reply("❌ Usage: /test <numero>")
 
@@ -129,30 +128,29 @@ Commandes disponibles:
 
 📝 Configuration:
 • Canal Source: {SOURCE_CHANNEL_ID}
-• Canal Prédiction: {PREDICTION_CHANNEL_ID}
+• Canal Prediction: {PREDICTION_CHANNEL_ID}
 • Admin ID: {ADMIN_ID}
 
-🎲 Règles:
-• Numéros valides: 1-1440 (sauf exclus)
-• Numéros exclus: {len(EXCLUDED_NUMBERS)} numéros
-• Logique: Impair reçu → Cycle pair | Pair reçu → Cycle impair
+🎲 Regles:
+• Numeros valides: 1-1440 (sauf exclus)
+• Numeros exclus: {len(EXCLUDED_NUMBERS)} numeros
+• Logique: Impair recu → Cycle pair | Pair recu → Cycle impair
 
-⏰ Dernière prédiction: {last_prediction or 'Aucune'}"""
+⏰ Derniere prediction: {last_prediction or 'Aucune'}"""
             await event.reply(info_msg)
 
         elif command == '/stats':
             await event.reply(f"""📈 Statistiques
 
-• Numéros exclus: {sorted(EXCLUDED_NUMBERS)}
-• Total numéros valides: {len(PREDICTION_MAP)}
+• Numeros exclus: {sorted(EXCLUDED_NUMBERS)}
+• Total numeros valides: {len(PREDICTION_MAP)}
 • Cycle impair: {CYCLE_IMPAIR}
 • Cycle pair: {CYCLE_PAIR}""")
 
         elif command == '/restart':
-            await event.reply("🔄 Redémarrage demandé...")
-            logger.info("Redémarrage demandé par admin")
-            # On ne redémarre pas vraiment, juste un message
-            await event.reply("✅ Bot opérationnel")
+            await event.reply("🔄 Redemarrage demande...")
+            logger.info("Redemarrage demande par admin")
+            await event.reply("✅ Bot operationnel")
 
         elif command == '/excluded':
             excluded_list = sorted(EXCLUDED_NUMBERS)
@@ -172,60 +170,60 @@ Commandes disponibles:
 # =====================================================
 
 async def handle_source_message(event):
-    """Gère les messages du canal source"""
+    """Gere les messages du canal source"""
     global last_prediction
 
     try:
-        # Extraire le numéro du message
+        # Extraire le numero du message
         text = event.message.text or ""
-        logger.info(f"📩 Message reçu du canal source: {text[:50]}...")
+        logger.info(f"📩 Message recu du canal source: {text[:50]}...")
 
-        # Chercher un numéro dans le message
+        # Chercher un numero dans le message
         import re
         numbers = re.findall(r'\b(\d+)\b', text)
 
         if not numbers:
-            logger.info("Aucun numéro trouvé dans le message")
+            logger.info("Aucun numero trouve dans le message")
             return
 
-        # Prendre le premier numéro trouvé
+        # Prendre le premier numero trouve
         number = int(numbers[0])
-        logger.info(f"🔢 Numéro extrait: {number}")
+        logger.info(f"🔢 Numero extrait: {number}")
 
-        # Vérifier si c'est un numéro exclu
+        # Verifier si c'est un numero exclu
         if number in EXCLUDED_NUMBERS:
-            logger.info(f"🚫 Numéro {number} est exclu - pas de prédiction")
+            logger.info(f"🚫 Numero {number} est exclu - pas de prediction")
             await bot_client.send_message(
                 ADMIN_ID, 
-                f"🚫 Numéro exclu reçu: {number}\nPas de prédiction générée."
+                f"🚫 Numero exclu recu: {number}\nPas de prediction generee."
             )
             return
 
-        # Vérifier que le numéro est dans la plage valide
+        # Verifier que le numero est dans la plage valide
         if number < 1 or number > 1440:
-            logger.warning(f"⚠️ Numéro {number} hors plage (1-1440)")
+            logger.warning(f"⚠️ Numero {number} hors plage (1-1440)")
             return
 
-        # Obtenir la prédiction
+        # Obtenir la prediction
         suit = get_prediction(number)
         if not suit:
-            logger.error(f"❌ Pas de prédiction trouvée pour {number}")
+            logger.error(f"❌ Pas de prediction trouvee pour {number}")
             return
 
-        # Formater et envoyer la prédiction
+        # Formater et envoyer la prediction
         message = format_prediction_message(number, suit)
 
-        # Envoyer au canal de prédiction
+        # Envoyer au canal de prediction
         await bot_client.send_message(PREDICTION_CHANNEL_ID, message)
-        logger.info(f"✅ Prédiction envoyée: {number} -> {suit}")
+        logger.info(f"✅ Prediction envoyee: {number} -> {suit}")
 
-        # Mettre à jour la dernière prédiction
-        last_prediction = f"{number} -> {suit} à {datetime.now().strftime('%H:%M:%S')}"
+        # Mettre a jour la derniere prediction
+        last_prediction = f"{number} -> {suit} a {datetime.now().strftime('%H:%M:%S')}"
 
         # Notifier l'admin
         await bot_client.send_message(
             ADMIN_ID,
-            f"✅ Prédiction faite:\n{message}"
+            f"✅ Prediction faite:\n{message}"
         )
 
     except Exception as e:
@@ -234,33 +232,31 @@ async def handle_source_message(event):
         logger.error(traceback.format_exc())
 
 # =====================================================
-# PARTIE 5 : DÉMARRAGE DU BOT
+# PARTIE 5 : DEMARRAGE DU BOT
 # =====================================================
 
 async def start_bot():
-    """Démarre le bot Telegram"""
-    global bot_client, admin_client
+    """Demarre le bot Telegram"""
+    global bot_client
 
     from telethon import TelegramClient, events
     from telethon.sessions import StringSession
 
-    # Vérifier la configuration
+    # Verifier la configuration
     if not all([API_ID, API_HASH, BOT_TOKEN]):
-        logger.error("❌ Configuration Telegram incomplète!")
+        logger.error("❌ Configuration Telegram incomplete!")
         return None
 
-    # Créer le client
+    # Creer le client
     session_string = os.getenv('TELEGRAM_SESSION', '')
     bot_client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
     try:
         await bot_client.start(bot_token=BOT_TOKEN)
-        logger.info("✅ Bot connecté à Telegram")
+        logger.info("✅ Bot connecte a Telegram")
 
-        # Récupérer les dialogs pour avoir accès aux entités
-        if not session_string:
-            await bot_client.get_dialogs()
-            logger.info("✅ Dialogs chargés")
+        # NE PAS appeler get_dialogs() pour les bots - RESTRICTION API
+        # Les bots n'ont pas besoin de get_dialogs pour fonctionner
 
         # Configurer le handler pour le canal source
         @bot_client.on(events.NewMessage(chats=SOURCE_CHANNEL_ID))
@@ -273,7 +269,7 @@ async def start_bot():
             if event.sender_id == ADMIN_ID:
                 await handle_admin_commands(event)
 
-        # Test d'accès aux canaux
+        # Test d'acces aux canaux (optionnel, juste pour les logs)
         try:
             await bot_client.get_entity(SOURCE_CHANNEL_ID)
             logger.info(f"✅ Canal source {SOURCE_CHANNEL_ID} accessible")
@@ -282,35 +278,35 @@ async def start_bot():
 
         try:
             await bot_client.get_entity(PREDICTION_CHANNEL_ID)
-            logger.info(f"✅ Canal prédiction {PREDICTION_CHANNEL_ID} accessible")
+            logger.info(f"✅ Canal prediction {PREDICTION_CHANNEL_ID} accessible")
         except Exception as e:
-            logger.warning(f"⚠️ Canal prédiction inaccessible: {e}")
+            logger.warning(f"⚠️ Canal prediction inaccessible: {e}")
 
-        # Message de démarrage à l'admin
+        # Message de demarrage a l'admin
         try:
-            startup_msg = f"""🤖 Bot de Prédiction Démarré!
+            startup_msg = f"""🤖 Bot de Prediction Demarre!
 
 📊 Configuration:
 • Source: {SOURCE_CHANNEL_ID}
-• Prédiction: {PREDICTION_CHANNEL_ID}
+• Prediction: {PREDICTION_CHANNEL_ID}
 • Port: {PORT}
 
-🎲 Règles actives:
-• Impair reçu → Cycle pair
-• Pair reçu → Cycle impair
-• {len(EXCLUDED_NUMBERS)} numéros exclus
+🎲 Regles actives:
+• Impair recu → Cycle pair
+• Pair recu → Cycle impair
+• {len(EXCLUDED_NUMBERS)} numeros exclus
 
 Commandes: /start, /test <n>, /info, /stats, /excluded"""
 
             await bot_client.send_message(ADMIN_ID, startup_msg)
-            logger.info("✅ Message de démarrage envoyé à l'admin")
+            logger.info("✅ Message de demarrage envoye a l'admin")
         except Exception as e:
             logger.error(f"❌ Impossible de contacter l'admin: {e}")
 
         return bot_client
 
     except Exception as e:
-        logger.error(f"❌ Erreur démarrage bot: {e}")
+        logger.error(f"❌ Erreur demarrage bot: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return None
@@ -321,36 +317,36 @@ Commandes: /start, /test <n>, /info, /stats, /excluded"""
 
 async def main():
     """Fonction principale"""
-    logger.info("🚀 Démarrage du bot de prédiction...")
+    logger.info("🚀 Demarrage du bot de prediction...")
 
-    # Démarrer le serveur web (pour Render.com)
+    # Demarrer le serveur web (pour Render.com)
     web_runner = await start_web_server()
 
-    # Démarrer le bot Telegram
+    # Demarrer le bot Telegram
     client = await start_bot()
 
     if not client:
-        logger.error("❌ Impossible de démarrer le bot. Arrêt.")
+        logger.error("❌ Impossible de demarrer le bot. Arret.")
         return
 
-    logger.info("✅ Bot et serveur web sont opérationnels")
+    logger.info("✅ Bot et serveur web sont operationnels")
     logger.info("⏳ En attente de messages...")
 
     # Garder le programme en vie
     try:
         while True:
-            await asyncio.sleep(3600)  # Attendre 1 heure
+            await asyncio.sleep(3600)
     except KeyboardInterrupt:
-        logger.info("👋 Arrêt demandé par l'utilisateur")
+        logger.info("👋 Arret demande par l'utilisateur")
     finally:
         await client.disconnect()
-        logger.info("🔌 Bot déconnecté")
+        logger.info("🔌 Bot deconnecte")
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Programme arrêté")
+        logger.info("👋 Programme arrete")
     except Exception as e:
         logger.error(f"💥 Erreur fatale: {e}")
         import traceback

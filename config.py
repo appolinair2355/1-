@@ -6,7 +6,7 @@ import os
 # Telegram API credentials
 API_ID = 29177661
 API_HASH = "a8639172fa8d35dbfd8ea46286d349ab"
-BOT_TOKEN = "7815360317:AAGsrFzeUZrHOjujf5aY2UjlBj4GOblHSig"
+BOT_TOKEN = "8359623168:AAHno00lno02QOw5OvGukP0TIgn4sDFB158"
 
 # IDs des canaux
 SOURCE_CHANNEL_ID = -1002682552255      # Canal source où on reçoit les numéros

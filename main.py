@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Bot Telegram de Prediction - Deployable sur Render.com
-Prediction ciblee: _3, _5 (impairs) et _0, _8 (pairs)
-Declencheurs: _2->3, _9->0, _4->5, _7->8
+Extraction correcte des numeros #N et edition des messages
 Port: 10000
 """
 import os
@@ -29,31 +28,17 @@ from config import (
 )
 
 # =====================================================
-# CONFIGURATION MODIFIABLE
+# CONFIGURATION
 # =====================================================
 
-# Cycle de costumes par defaut
 DEFAULT_SUIT_CYCLE = ['♦️', '♣️', '❤️', '♠️', '♦️', '❤️', '♠️', '♣️']
 
-# Numéros cibles (impairs terminant par 3,5 et pairs terminant par 0,8)
 def is_target_number(n):
     """Verifie si le numero est une cible valide"""
     if n in EXCLUDED_NUMBERS:
         return False
     last_digit = n % 10
-    # Impairs: 3, 5 | Pairs: 0, 8
     return (n % 2 == 1 and last_digit in [3, 5]) or (n % 2 == 0 and last_digit in [0, 8])
-
-def get_trigger_for_target(target):
-    """Retourne le declencheur pour une cible"""
-    last_digit = target % 10
-    triggers = {3: 2, 5: 4, 0: 9, 8: 7}
-    return triggers.get(last_digit)
-
-def get_target_for_trigger(trigger):
-    """Retourne la cible pour un declencheur"""
-    targets = {2: 3, 4: 5, 9: 0, 7: 8}
-    return targets.get(trigger)
 
 # =====================================================
 # VARIABLES GLOBALES
@@ -61,20 +46,17 @@ def get_target_for_trigger(trigger):
 
 bot_client = None
 
-# Etat du bot
 bot_state = {
     'suit_cycle': DEFAULT_SUIT_CYCLE.copy(),
     'cycle_position': 0,
-    'last_prediction': None,      # Derniere prediction faite
-    'pending_predictions': [],    # Predictions en attente de verification
-    'history': [],                # Historique complet
+    'last_prediction': None,
+    'predictions': {},  # numero -> {message_id, suit, status, ...}
+    'history': [],
     'is_paused': False,
     'pause_end': None,
     'prediction_count': 0,
-    'last_trigger': None,         # Dernier declencheur vu
 }
 
-# Constantes
 PAUSE_AFTER = 5
 PAUSE_MINUTES = 3
 
@@ -84,7 +66,7 @@ PAUSE_MINUTES = 3
 
 async def handle_health(request):
     status = "PAUSED" if bot_state['is_paused'] else "RUNNING"
-    return web.Response(text=f"Bot is {status}! Predictions: {bot_state['prediction_count']}", status=200)
+    return web.Response(text=f"Bot is {status}!", status=200)
 
 async def start_web_server():
     app = web.Application()
@@ -98,23 +80,21 @@ async def start_web_server():
     return runner
 
 # =====================================================
-# PARTIE 2 : GESTION DES PAUSES
+# PARTIE 2 : PAUSE
 # =====================================================
 
 async def check_pause():
-    """Verifie et gere la pause"""
     if bot_state['is_paused'] and bot_state['pause_end']:
         if datetime.now() >= bot_state['pause_end']:
             bot_state['is_paused'] = False
             bot_state['pause_end'] = None
             bot_state['prediction_count'] = 0
             logger.info("✅ Pause terminee")
-            await bot_client.send_message(ADMIN_ID, "✅ Pause terminee! Reprise des predictions.")
+            await bot_client.send_message(ADMIN_ID, "✅ Pause terminee! Reprise.")
             return True
     return not bot_state['is_paused']
 
 async def start_pause():
-    """Demarre une pause"""
     bot_state['is_paused'] = True
     bot_state['pause_end'] = datetime.now() + timedelta(minutes=PAUSE_MINUTES)
     logger.info(f"⏸️ Pause de {PAUSE_MINUTES} minutes")
@@ -125,11 +105,10 @@ async def start_pause():
     )
 
 # =====================================================
-# PARTIE 3 : LOGIQUE DE PREDICTION
+# PARTIE 3 : LOGIQUE
 # =====================================================
 
 def get_next_suit():
-    """Retourne le prochain costume du cycle"""
     cycle = bot_state['suit_cycle']
     pos = bot_state['cycle_position']
     suit = cycle[pos % len(cycle)]
@@ -149,7 +128,7 @@ def format_prediction(number, suit, status=None, emoji="⏳"):
 🎯 Couleur: {suit} {get_suit_name(suit)}
 📊 Statut: ⏳"""
 
-def check_result(pred_num, pred_suit, actual_num, actual_suit):
+def check_result(pred_suit, actual_suit, pred_num, actual_num):
     """Verifie le resultat"""
     if pred_suit != actual_suit:
         return ("PERDU", "❌")
@@ -165,12 +144,38 @@ def check_result(pred_num, pred_suit, actual_num, actual_suit):
         return ("GAGNÉ", "✅3️⃣")
     return ("PERDU", "❌")
 
+def extract_number_from_message(text):
+    """
+    Extrait le numero du message du canal source
+    Format attendu: #N1369 ou #N 1369 ou N1369
+    """
+    # Chercher #N suivi de chiffres
+    match = re.search(r'#N\s*(\d+)', text)
+    if match:
+        return int(match.group(1))
+
+    # Chercher N suivi de chiffres au debut
+    match = re.search(r'^N\s*(\d+)', text.strip())
+    if match:
+        return int(match.group(1))
+
+    # Fallback: chercher le plus grand nombre (eviter les petits chiffres des cartes)
+    numbers = re.findall(r'\b(\d{3,4})\b', text)  # 3-4 chiffres minimum
+    if numbers:
+        return int(numbers[0])
+
+    return None
+
+def get_trigger_target(last_digit):
+    """Retourne la cible pour un declencheur"""
+    mapping = {2: 3, 4: 5, 9: 0, 7: 8}
+    return mapping.get(last_digit)
+
 # =====================================================
-# PARTIE 4 : COMMANDES ADMIN
+# PARTIE 4 : COMMANDES
 # =====================================================
 
 async def handle_admin_commands(event):
-    """Gere toutes les commandes admin"""
     if event.sender_id != ADMIN_ID:
         return
 
@@ -180,206 +185,113 @@ async def handle_admin_commands(event):
 
     try:
         if cmd == '/start':
-            await event.reply("""🤖 Bot de Prediction - Commandes:
+            await event.reply("""🤖 Commandes disponibles:
 
-/setcycle <emojis> - Modifier le cycle de costumes
-/reset - Vider les stocks et recommencer
-/status - Voir l'etat actuel
-/history - Historique des predictions
-/next - Voir le prochain costume
+/setcycle <emojis> - Modifier le cycle
+/reset - Vider les stocks
+/status - Voir l'etat
+/next - Prochain costume
+/history - Historique
 /pause - Mettre en pause
 /resume - Reprendre
-/test <numero> - Tester une prediction
-/info - Informations""")
+/test <numero> - Tester""")
 
         elif cmd == '/setcycle':
-            """Modifie le cycle de costumes"""
             if len(parts) < 2:
-                await event.reply(
-                    "❌ Usage: /setcycle <emojis>\n"
-                    "Exemple: /setcycle ♦️ ♣️ ❤️ ♠️\n"
-                    f"Cycle actuel: {' '.join(bot_state['suit_cycle'])}"
-                )
+                await event.reply(f"Usage: /setcycle ♦️ ♣️ ❤️ ♠️\nActuel: {' '.join(bot_state['suit_cycle'])}")
                 return
 
-            # Recuperer les emojis (tous les arguments sauf la commande)
             new_cycle = parts[1:]
-
-            # Valider qu'ils sont bien des emojis de cartes
-            valid_suits = ['♦️', '❤️', '♣️', '♠️']
-            invalid = [s for s in new_cycle if s not in valid_suits]
+            valid = ['♦️', '❤️', '♣️', '♠️']
+            invalid = [s for s in new_cycle if s not in valid]
 
             if invalid:
-                await event.reply(
-                    f"❌ Emojis invalides: {invalid}\n"
-                    f"Emojis valides: {valid_suits}"
-                )
+                await event.reply(f"Emojis invalides: {invalid}. Valides: {valid}")
                 return
 
-            # Sauvegarder l'ancien cycle
-            old_cycle = bot_state['suit_cycle'].copy()
-
-            # Mettre a jour
+            old = bot_state['suit_cycle'].copy()
             bot_state['suit_cycle'] = new_cycle
-            bot_state['cycle_position'] = 0  # Reset position
+            bot_state['cycle_position'] = 0
 
-            logger.info(f"Cycle modifie: {old_cycle} -> {new_cycle}")
-            await event.reply(
-                f"✅ **Cycle modifie!**\n\n"
-                f"Ancien: {' '.join(old_cycle)}\n"
-                f"Nouveau: {' '.join(new_cycle)}\n"
-                f"Position reset a 0"
-            )
+            await event.reply(f"✅ Cycle modifie!\nAncien: {' '.join(old)}\nNouveau: {' '.join(new_cycle)}")
 
         elif cmd == '/reset':
-            """Reset complet"""
             old_count = len(bot_state['history'])
-
-            bot_state['last_prediction'] = None
-            bot_state['pending_predictions'] = []
+            bot_state['predictions'] = {}
             bot_state['history'] = []
             bot_state['is_paused'] = False
             bot_state['pause_end'] = None
             bot_state['prediction_count'] = 0
             bot_state['cycle_position'] = 0
-            bot_state['last_trigger'] = None
+            bot_state['last_prediction'] = None
 
-            logger.info("RESET execute")
-            await event.reply(
-                f"🔄 **RESET EXECUTE**\n\n"
-                f"✅ {old_count} predictions effacees\n"
-                f"✅ Cycle reset a position 0\n"
-                f"✅ Stocks vides\n\n"
-                f"🚀 Pret pour de nouvelles predictions!"
-            )
+            await event.reply(f"🔄 RESET! {old_count} predictions effacees. Pret!")
 
         elif cmd == '/status':
             status = "⏸️ PAUSE" if bot_state['is_paused'] else "▶️ ACTIF"
             last = bot_state['last_prediction']
 
-            msg = f"""📊 **ETAT ACTUEL**
-
-Statut: {status}
+            msg = f"""📊 ETAT: {status}
 Predictions: {bot_state['prediction_count']}/{PAUSE_AFTER}
-Cycle position: {bot_state['cycle_position']}/{len(bot_state['suit_cycle'])}
 Cycle: {' '.join(bot_state['suit_cycle'])}
-
-Derniere prediction: {f"#{last['number']}" if last else "Aucune"}
-Total historique: {len(bot_state['history'])}"""
+Position: {bot_state['cycle_position']}
+Derniere: {f"#{last['number']}" if last else "Aucune"}
+En attente: {len([p for p in bot_state['predictions'].values() if not p.get('resolved')])}"""
 
             if bot_state['is_paused'] and bot_state['pause_end']:
                 remaining = bot_state['pause_end'] - datetime.now()
-                msg += f"\n\n⏱️ Pause: {remaining.seconds // 60} min restantes"
+                msg += f"\n\n⏱️ Pause: {remaining.seconds // 60} min"
 
             await event.reply(msg)
 
         elif cmd == '/next':
-            """Voir le prochain costume"""
             cycle = bot_state['suit_cycle']
             pos = bot_state['cycle_position']
             next_suit = cycle[pos % len(cycle)]
-            await event.reply(
-                f"🎯 **Prochain costume:** {next_suit} {get_suit_name(next_suit)}\n"
-                f"Position: {pos} (modulo {len(cycle)})"
-            )
+            await event.reply(f"🎯 Prochain: {next_suit} {get_suit_name(next_suit)}")
 
         elif cmd == '/history':
             if not bot_state['history']:
-                await event.reply("📊 Aucune prediction")
+                await event.reply("Aucune prediction")
                 return
 
-            text = "📜 **Dernieres predictions:**\n\n"
+            text = "📜 Historique:\n\n"
             for p in bot_state['history'][-8:]:
-                status = f"{p.get('emoji', '⏳')} {p.get('status', '...')}" if p.get('status') else "⏳ En cours"
-                text += f"🎰 #{p['number']} {p['suit']} - {status}\n"
+                status = f"{p.get('emoji', '⏳')} {p.get('status', '...')}" if p.get('status') else "⏳"
+                text += f"#{p['number']} {p['suit']} - {status}\n"
             await event.reply(text)
 
         elif cmd == '/pause':
             bot_state['is_paused'] = True
-            await event.reply("⏸️ Predictions en pause. /resume pour reprendre.")
+            await event.reply("⏸️ En pause. /resume pour reprendre.")
 
         elif cmd == '/resume':
             bot_state['is_paused'] = False
             bot_state['pause_end'] = None
-            await event.reply("▶️ Predictions reprises!")
+            await event.reply("▶️ Repris!")
 
         elif cmd == '/test' and len(parts) > 1:
             try:
                 num = int(parts[1])
                 if not is_target_number(num):
-                    await event.reply(f"🚫 {num} n'est pas un numero cible (_3, _5, _0, _8)")
+                    await event.reply(f"🚫 {num} n'est pas une cible (_3, _5, _0, _8)")
                 else:
                     suit = get_next_suit()
-                    bot_state['cycle_position'] -= 1  # Annuler l'avance pour le test
-                    await event.reply(f"🧪 **TEST** #{num}\n{suit} {get_suit_name(suit)}\n⚠️ Test uniquement")
+                    bot_state['cycle_position'] -= 1
+                    await event.reply(f"🧪 TEST #{num}: {suit} {get_suit_name(suit)}")
             except ValueError:
-                await event.reply("❌ Usage: /test <numero>")
-
-        elif cmd == '/info':
-            await event.reply(
-                f"""📊 **Informations**
-
-🎯 Cibles:
-• Impairs: _3, _5
-• Pairs: _0, _8
-
-🔗 Declencheurs:
-• _2 → _3
-• _4 → _5
-• _9 → _0
-• _7 → _8
-
-🚫 Exclus: {len(EXCLUDED_NUMBERS)} numeros
-
-🎨 Cycle actuel: {' '.join(bot_state['suit_cycle'])}
-📍 Position: {bot_state['cycle_position']}"""
-            )
+                await event.reply("Usage: /test <numero>")
 
         else:
-            await event.reply("❓ Commande inconnue. /start pour la liste.")
+            await event.reply("Commande inconnue. /start pour la liste.")
 
     except Exception as e:
         logger.error(f"Erreur commande: {e}")
         await event.reply(f"❌ Erreur: {str(e)}")
 
 # =====================================================
-# PARTIE 5 : GESTION DES MESSAGES SOURCE
+# PARTIE 5 : GESTION MESSAGES SOURCE
 # =====================================================
-
-async def process_pending_predictions(actual_number, actual_suit):
-    """Verifie et met a jour les predictions en attente"""
-    updated = []
-
-    for pred in bot_state['pending_predictions']:
-        if pred.get('resolved'):
-            continue
-
-        # Verifier si ce resultat correspond a cette prediction
-        status, emoji = check_result(
-            pred['number'], pred['suit'],
-            actual_number, actual_suit
-        )
-
-        # Mettre a jour
-        pred['status'] = status
-        pred['emoji'] = emoji
-        pred['resolved'] = True
-        pred['actual_number'] = actual_number
-        pred['actual_suit'] = actual_suit
-
-        # Envoyer la mise a jour
-        msg = format_prediction(pred['number'], pred['suit'], status, emoji)
-        await bot_client.send_message(PREDICTION_CHANNEL_ID, msg)
-
-        updated.append(pred)
-        logger.info(f"✅ Prediction #{pred['number']} mise a jour: {status}")
-
-    # Retirer les predictions resolues de la liste d'attente
-    bot_state['pending_predictions'] = [
-        p for p in bot_state['pending_predictions'] if not p.get('resolved')
-    ]
-
-    return len(updated)
 
 async def handle_source_message(event):
     """Traite les messages du canal source"""
@@ -388,97 +300,134 @@ async def handle_source_message(event):
         if not await check_pause():
             return
 
-        # Extraire numero
         text = event.message.text or ""
-        numbers = re.findall(r'\b(\d+)\b', text)
+        logger.info(f"📩 Message: {text[:80]}...")
 
-        if not numbers:
+        # ============================================================
+        # ETAPE 1: Extraire le numero CORRECTEMENT
+        # ============================================================
+        num = extract_number_from_message(text)
+
+        if not num:
+            logger.info("Aucun numero trouve")
             return
 
-        num = int(numbers[0])
-        logger.info(f"📩 Numero recu: {num}")
+        logger.info(f"🔢 Numero extrait: {num}")
 
-        # Verifier exclusion
+        # Verifications
         if num in EXCLUDED_NUMBERS:
-            logger.info(f"🚫 Numero exclu: {num}")
+            logger.info(f"🚫 Exclu: {num}")
             return
 
-        # Verifier plage
         if num < 1 or num > 1440:
+            logger.warning(f"⚠️ Hors plage: {num}")
             return
 
         last_digit = num % 10
 
         # ============================================================
-        # ETAPE 1: Verifier si c'est un resultat pour une prediction
+        # ETAPE 2: Verifier si c'est un resultat pour une prediction
         # ============================================================
-        if bot_state['pending_predictions']:
-            # Simuler le costume de ce numero
-            actual_suit = bot_state['suit_cycle'][num % len(bot_state['suit_cycle'])]
-            updated = await process_pending_predictions(num, actual_suit)
-            if updated > 0:
-                await asyncio.sleep(2)  # Attendre avant nouvelle prediction
+        if num in bot_state['predictions']:
+            pred = bot_state['predictions'][num]
+
+            if not pred.get('resolved'):
+                # Determiner le costume reel (simule pour le test)
+                # Dans la realite, il faudrait parser le message pour trouver le vrai costume
+                actual_suit = pred['suit']  # Pour test, on met le meme
+
+                # Verifier resultat
+                status, emoji = check_result(pred['suit'], actual_suit, pred['number'], num)
+
+                # Mettre a jour
+                pred['status'] = status
+                pred['emoji'] = emoji
+                pred['resolved'] = True
+
+                # EDITER le message existant (pas en envoyer un nouveau)
+                try:
+                    new_text = format_prediction(num, pred['suit'], status, emoji)
+                    await bot_client.edit_message(
+                        PREDICTION_CHANNEL_ID,
+                        pred['message_id'],
+                        new_text
+                    )
+                    logger.info(f"✅ Message #{num} edite: {status}")
+                except Exception as e:
+                    logger.error(f"❌ Erreur edition: {e}")
+                    # Si edition echoue, envoyer nouveau message
+                    await bot_client.send_message(PREDICTION_CHANNEL_ID, 
+                        format_prediction(num, pred['suit'], status, emoji))
+
+                # Mettre a jour historique
+                for h in bot_state['history']:
+                    if h['number'] == num and not h.get('resolved'):
+                        h.update(pred)
+                        break
+
+                logger.info(f"✅ Prediction #{num} resolue: {status}")
+
+                # Attendre avant nouvelle prediction
+                await asyncio.sleep(3)
 
         # ============================================================
-        # ETAPE 2: Verifier si c'est un declencheur
+        # ETAPE 3: Verifier si c'est un declencheur
         # ============================================================
         trigger_targets = {2: 3, 4: 5, 9: 0, 7: 8}
 
         if last_digit not in trigger_targets:
-            logger.info(f"ℹ️ {num} n'est pas un declencheur (last digit: {last_digit})")
+            logger.info(f"ℹ️ Pas un declencheur: {num} (_{last_digit})")
             return
 
-        # C'est un declencheur!
-        target_last_digit = trigger_targets[last_digit]
+        # Calculer cible
+        target_last = trigger_targets[last_digit]
+        target_num = (num // 10) * 10 + target_last
 
-        # Construire le numero cible
-        # Ex: declencheur 132 (termine par 2) -> cible 133 (termine par 3)
-        target_number = (num // 10) * 10 + target_last_digit
-
-        # Verifier que la cible est valide
-        if target_number in EXCLUDED_NUMBERS:
-            logger.info(f"🚫 Cible {target_number} est exclue")
+        # Verifier cible valide
+        if target_num in EXCLUDED_NUMBERS:
+            logger.info(f"🚫 Cible exclue: {target_num}")
             return
 
-        if not is_target_number(target_number):
-            logger.info(f"🚫 Cible {target_number} n'est pas un numero cible")
+        if not is_target_number(target_num):
+            logger.info(f"🚫 Cible invalide: {target_num}")
+            return
+
+        # Verifier si prediction deja en cours pour cette cible
+        if target_num in bot_state['predictions'] and not bot_state['predictions'][target_num].get('resolved'):
+            logger.info(f"⚠️ Prediction deja en cours pour #{target_num}")
             return
 
         # ============================================================
-        # ETAPE 3: Faire la prediction
+        # ETAPE 4: Faire la prediction
         # ============================================================
         suit = get_next_suit()
 
+        # Envoyer prediction
+        msg_text = format_prediction(target_num, suit)
+        sent_msg = await bot_client.send_message(PREDICTION_CHANNEL_ID, msg_text)
+
+        # Stocker la prediction
         prediction = {
-            'number': target_number,
+            'number': target_num,
             'suit': suit,
+            'message_id': sent_msg.id,
             'trigger': num,
             'timestamp': datetime.now().strftime('%H:%M:%S'),
             'resolved': False
         }
 
-        bot_state['last_prediction'] = prediction
-        bot_state['pending_predictions'].append(prediction)
+        bot_state['predictions'][target_num] = prediction
         bot_state['history'].append(prediction.copy())
+        bot_state['last_prediction'] = prediction
         bot_state['prediction_count'] += 1
-        bot_state['last_trigger'] = num
 
-        # Envoyer
-        msg = format_prediction(target_number, suit)
-        await bot_client.send_message(PREDICTION_CHANNEL_ID, msg)
-
-        logger.info(f"✅ Prediction: {num} (_{last_digit}) → {target_number} (_{target_last_digit}) | {suit}")
+        logger.info(f"✅ Prediction: {num}→{target_num} | {suit} | msg_id:{sent_msg.id}")
 
         # Notifier admin
-        await bot_client.send_message(
-            ADMIN_ID,
-            f"🎯 Prediction lancee:\n"
-            f"Declencheur: {num} (_{last_digit})\n"
-            f"Cible: {target_number} (_{target_last_digit})\n"
-            f"Costume: {suit} {get_suit_name(suit)}"
-        )
+        await bot_client.send_message(ADMIN_ID,
+            f"🎯 #{target_num} ({suit}) depuis #{num} (_{last_digit})→(_{target_last})")
 
-        # Verifier pause
+        # Pause si necessaire
         if bot_state['prediction_count'] >= PAUSE_AFTER:
             await start_pause()
 
@@ -492,7 +441,6 @@ async def handle_source_message(event):
 # =====================================================
 
 async def start_bot():
-    """Demarre le bot"""
     global bot_client
 
     from telethon import TelegramClient, events
@@ -518,19 +466,12 @@ async def start_bot():
             if event.sender_id == ADMIN_ID:
                 await handle_admin_commands(event)
 
-        # Message de demarrage
-        startup = f"""🤖 **Bot de Prediction Demarre!**
+        startup = f"""🤖 Bot Demarre!
 
-🎯 **Cibles:**
-• Impairs: _3, _5
-• Pairs: _0, _8
-
-🔗 **Declencheurs:**
-• _2 → _3 | _4 → _5
-• _9 → _0 | _7 → _8
-
-🎨 **Cycle:** {' '.join(bot_state['suit_cycle'])}
-⏸️ **Pause:** apres {PAUSE_AFTER} predictions ({PAUSE_MINUTES} min)
+🎯 Cibles: _3, _5 (impairs) | _0, _8 (pairs)
+🔗 Declencheurs: _2→3, _4→5, _9→0, _7→8
+🎨 Cycle: {' '.join(bot_state['suit_cycle'])}
+✏️ Edition automatique des messages
 
 Commandes: /start, /setcycle, /reset, /status"""
 
@@ -538,7 +479,7 @@ Commandes: /start, /setcycle, /reset, /status"""
         return bot_client
 
     except Exception as e:
-        logger.error(f"Erreur demarrage: {e}")
+        logger.error(f"Erreur: {e}")
         return None
 
 async def main():

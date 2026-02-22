@@ -1,6 +1,4 @@
-"""
-Configuration du bot - Variables d'environnement pour Render.com
-"""
+"""Configuration du bot - Variables d'environnement pour Render.com"""
 import os
 
 # Telegram API credentials (fixes)
@@ -25,3 +23,24 @@ EXCLUDED_NUMBERS = set(
     list(range(1266, 1271)) +   # 1266, 1267, 1268, 1269, 1270
     list(range(1386, 1391))     # 1386, 1387, 1388, 1389, 1390
 )
+
+# ============ CONFIGURATION PAR DEFAUT DES ENDINGS ============
+# Format: "trigger_ending:prediction_ending" (exactement 4 paires)
+# Exemple: "1:0,3:2,5:4,7:6" signifie:
+#   - Trigger finit par 1 → Prédit finit par 0
+#   - Trigger finit par 3 → Prédit finit par 2
+#   - Trigger finit par 5 → Prédit finit par 4
+#   - Trigger finit par 7 → Prédit finit par 6
+DEFAULT_TRIGGER_PREDICTION_MAP = {"1": "0", "3": "2", "5": "4", "7": "6"}
+
+# ============ CONFIGURATION PAR DEFAUT DU CYCLE DES COSTUMES ============
+# Liste des costumes dans l'ordre du cycle
+DEFAULT_SUIT_CYCLE = ['♥', '♦', '♣', '♠', '♦', '♥', '♠', '♣']
+
+# Affichage des costumes (mapping pour l'affichage)
+SUIT_DISPLAY = {
+    '♥': '♥️ Rouge (Cœur)',
+    '♦': '♦️ Rouge (Carreau)',
+    '♣': '♣️ Noir (Trèfle)',
+    '♠': '♠️ Noir (Pique)'
+}

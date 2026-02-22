@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bot Telegram de Prediction - CORRIGÉ v3
+Bot Telegram de Prediction - CORRIGÉ v4
 Logique: Cibles _3,_5 (impairs) et _0,_8 (pairs)
 Déclencheurs: _2,_4,_9,_7
 Port: 10000
@@ -43,7 +43,6 @@ EXCLUDED_NUMBERS = set(
 )
 
 # Configuration des FINS DE NUMÉRO (derniers chiffres)
-# Déclencheur: Cible (le numéro prédit doit être SUPÉRIEUR au déclencheur)
 TARGET_CONFIG = {
     'impairs': [3, 5],      # Fins de numéro impairs à prédire
     'pairs': [0, 8],        # Fins de numéro pairs à prédire
@@ -192,15 +191,57 @@ def get_next_suit():
     bot_state['cycle_pos'] = (pos + 1) % len(cycle)
     return suit
 
-def format_prediction(number, suit, status=None, emoji="⏳"):
-    """Formate le message de prediction SANS (fin: _X)"""
-    if status:
-        return f"""🎰 **PRÉDICTION #{number}**
+def format_prediction(number, suit, status=None):
+    """Formate le message de prediction - CORRIGÉ pour éviter le double ✅"""
+    if status == "pending" or status is None:
+        # Message initial
+        return f"""Бот №2
+🎰 **PRÉDICTION #{number}**
 🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
-📊 Statut: {emoji} {status}"""
-    return f"""🎰 **PRÉDICTION #{number}**
+📊 Statut: ⏳"""
+    
+    elif status == "✅0️⃣":
+        return f"""Бот №2
+🎰 **PRÉDICTION #{number}**
 🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
-⏳ Statut: EN ATTENTE DU RÉSULTAT..."""
+📊 Statut: ✅0️⃣ GAGNÉ"""
+    
+    elif status == "✅1️⃣":
+        return f"""Бот №2
+🎰 **PRÉDICTION #{number}**
+🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
+📊 Statut: ✅1️⃣ GAGNÉ"""
+    
+    elif status == "✅2️⃣":
+        return f"""Бот №2
+🎰 **PRÉDICTION #{number}**
+🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
+📊 Statut: ✅2️⃣ GAGNÉ"""
+    
+    elif status == "✅3️⃣":
+        return f"""Бот №2
+🎰 **PRÉDICTION #{number}**
+🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
+📊 Statut: ✅3️⃣ GAGNÉ"""
+    
+    elif status == "❌":
+        return f"""Бот №2
+🎰 **PRÉDICTION #{number}**
+🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
+📊 Statut: ❌ PERDU"""
+    
+    elif status == "⏹️":
+        return f"""Бот №2
+🎰 **PRÉDICTION #{number}**
+🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
+📊 Statut: ⏹️ EXPIRÉ"""
+    
+    else:
+        # Fallback
+        return f"""Бот №2
+🎰 **PRÉDICTION #{number}**
+🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
+📊 Statut: {status}"""
 
 def reset_verification_state():
     """Réinitialise l'état de vérification"""
@@ -276,12 +317,7 @@ async def check_prediction_timeout(current_game):
         
         try:
             predicted_suit = verification_state['predicted_suit']
-            updated_text = format_prediction(
-                predicted_num, 
-                predicted_suit, 
-                "⏹️ EXPIRÉ (délai dépassé)", 
-                "⏹️"
-            )
+            updated_text = format_prediction(predicted_num, predicted_suit, "⏹️")
             
             await bot_client.edit_message(
                 verification_state['channel_id'],
@@ -313,7 +349,7 @@ async def send_prediction(target_game, predicted_suit, base_game):
         return False
 
     try:
-        prediction_text = format_prediction(target_game, predicted_suit)
+        prediction_text = format_prediction(target_game, predicted_suit, "pending")
         sent_msg = await bot_client.send_message(PREDICTION_CHANNEL_ID, prediction_text)
 
         verification_state.update({
@@ -357,14 +393,8 @@ async def update_prediction_status(status):
         predicted_num = verification_state['predicted_number']
         predicted_suit = verification_state['predicted_suit']
 
-        if status == "❌":
-            status_text = "❌ PERDU"
-        elif status == "⏹️":
-            status_text = "⏹️ EXPIRÉ"
-        else:
-            status_text = f"{status} GAGNÉ"
-
-        updated_text = format_prediction(predicted_num, predicted_suit, status_text, status)
+        # Utiliser format_prediction avec le status directement
+        updated_text = format_prediction(predicted_num, predicted_suit, status)
 
         await bot_client.edit_message(
             verification_state['channel_id'],
@@ -381,6 +411,8 @@ async def update_prediction_status(status):
             stats_bilan['total'] += 1
             stats_bilan['losses'] += 1
             logger.info(f"💔 #{predicted_num} PERDU")
+        elif status == '⏹️':
+            logger.info(f"⏹️ #{predicted_num} EXPIRÉ")
 
         logger.info(f"🔓 SYSTÈME LIBÉRÉ")
         reset_verification_state()
@@ -865,7 +897,7 @@ async def start_bot():
 
         mapping_text = "\n".join([f"  _{k} → _{v}" for k, v in sorted(TARGET_CONFIG['triggers'].items())])
 
-        startup = f"""🤖 **BOT PRÉDICTION DÉMARRÉ** (v3 - Corrigé)
+        startup = f"""🤖 **BOT PRÉDICTION DÉMARRÉ** (v4 - Corrigé)
 
 🎯 **Cibles:** Impairs {TARGET_CONFIG['impairs']} | Pairs {TARGET_CONFIG['pairs']}
 🔗 **Mapping:**

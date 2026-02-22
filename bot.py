@@ -418,3 +418,744 @@ async def process_verification_step(game_number: int, message_text: str):
     else:
         logger.info(f"💔 PERDU après 4 vérifications (jusqu'à #{game_number})")
         await update_prediction_status("❌")
+
+async def check_and_launch_prediction(game_number: int):
+    """Vérifie et lance une prédiction avec CYCLE DE PAUSE"""
+    global pause_config
+
+    if verification_state['predicted_number'] is not None:
+        logger.warning(f"⛔ BLOQUÉ: Prédiction #{verification_state['predicted_number']} en attente de vérification. Déclencheur #{game_number} ignoré.")
+        return
+
+    if pause_config['is_paused']:
+        try:
+            end_time = datetime.fromisoformat(pause_config['pause_end_time'])
+            if datetime.now() < end_time:
+                remaining = int((end_time - datetime.now()).total_seconds())
+                logger.info(f"⏸️ Pause active: {remaining}s restantes")
+                return
+            pause_config['is_paused'] = False
+            pause_config['just_resumed'] = True
+            save_json(PAUSE_CONFIG_FILE, pause_config)
+            logger.info("🔄 Pause terminée, reprise")
+        except:
+            pause_config['is_paused'] = False
+
+    if not is_trigger_number(game_number):
+        return
+
+    target_num = get_trigger_target(game_number)
+    if not target_num or target_num in already_predicted_games:
+        return
+
+    pause_config['predictions_count'] += 1
+    current_count = pause_config['predictions_count']
+
+    logger.info(f"📊 Prédiction {current_count}/5 avant pause")
+
+    if current_count >= 5:
+        cycle = pause_config['cycle']
+        idx = pause_config['current_index'] % len(cycle)
+        duration = cycle[idx]
+
+        pause_config['is_paused'] = True
+        pause_config['pause_end_time'] = (datetime.now() + timedelta(seconds=duration)).isoformat()
+        pause_config['current_index'] += 1
+        save_json(PAUSE_CONFIG_FILE, pause_config)
+
+        minutes = duration // 60
+
+        logger.info(f"⏸️ PAUSE: {minutes}min")
+
+        try:
+            await client.send_message(
+                get_prediction_channel_id(),
+                f"⏸️ **PAUSE**\n⏱️ {minutes} minutes..."
+            )
+        except Exception as e:
+            logger.error(f"Erreur envoi message pause: {e}")
+
+        pause_config['predictions_count'] = 0
+        save_json(PAUSE_CONFIG_FILE, pause_config)
+
+        return
+
+    suit = get_suit_for_number(target_num)
+    if suit:
+        success = await send_prediction(target_num, suit, game_number)
+        if success:
+            already_predicted_games.add(target_num)
+            logger.info(f"✅ Prédiction #{target_num} lancée ({current_count}/5)")
+
+async def process_source_message(event, is_edit: bool = False):
+    """Traite les messages du canal source"""
+    global current_game_number, last_source_game_number
+
+    try:
+        message_text = event.message.message
+        game_number = extract_game_number(message_text)
+
+        if game_number is None:
+            return
+
+        is_editing = is_message_editing(message_text)
+        is_finalized = is_message_finalized(message_text)
+
+        log_type = "ÉDITÉ" if is_edit else "NOUVEAU"
+        log_status = "⏰" if is_editing else ("✅" if is_finalized else "📝")
+        logger.info(f"📩 {log_status} {log_type}: #{game_number}")
+
+        if verification_state['predicted_number'] is not None:
+            predicted_num = verification_state['predicted_number']
+            current_check = verification_state['current_check']
+            expected_number = predicted_num + current_check
+
+            if is_editing and game_number == expected_number:
+                logger.info(f"⏳ Message #{game_number} en édition, attente finalisation (✅/🔰)")
+                return
+
+            if game_number == expected_number:
+                if is_finalized or not is_editing:
+                    logger.info(f"✅ Numéro #{game_number} finalisé/disponible, vérification...")
+                    await process_verification_step(game_number, message_text)
+
+                    if verification_state['predicted_number'] is not None:
+                        logger.info(f"⏳ Prédiction #{verification_state['predicted_number']} toujours en cours")
+                        return
+                    else:
+                        logger.info("✅ Vérification terminée, système libre")
+                else:
+                    logger.info(f"⏳ Attente finalisation pour #{game_number}")
+            else:
+                logger.info(f"⏭️ Attente #{expected_number}, reçu #{game_number}")
+
+            return
+
+        await check_and_launch_prediction(game_number)
+
+        current_game_number = game_number
+        last_source_game_number = game_number
+
+    except Exception as e:
+        logger.error(f"❌ Erreur traitement message: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+# ============================================================
+# RESET AUTOMATIQUE
+# ============================================================
+
+async def auto_reset_monitor():
+    """Surveille et effectue un reset automatique si nécessaire"""
+    global verification_state, last_prediction_time, predictions_enabled, already_predicted_games, stats_bilan
+
+    while True:
+        await asyncio.sleep(60)  # Vérifier toutes les minutes
+
+        try:
+            now = datetime.now()
+            should_reset = False
+            reset_reason = ""
+
+            # Vérifier si une prédiction est bloquée (en cours depuis trop longtemps)
+            if verification_state['predicted_number'] is not None:
+                # Si prédiction en cours depuis plus de 20 minutes
+                if last_prediction_time and (now - last_prediction_time).total_seconds() > 1200:
+                    should_reset = True
+                    reset_reason = f"Prédiction #{verification_state['predicted_number']} bloquée depuis 20+ min"
+
+            # Vérifier si aucune prédiction depuis 20 minutes
+            elif last_prediction_time and (now - last_prediction_time).total_seconds() > 1200:
+                should_reset = True
+                reset_reason = "Aucune prédiction depuis 20+ min"
+
+            # Si le bot vient de démarrer et pas encore de prédiction, initialiser le timer
+            elif last_prediction_time is None:
+                last_prediction_time = now
+
+            if should_reset:
+                logger.warning(f"🚨 RESET AUTOMATIQUE DÉCLENCHÉ: {reset_reason}")
+
+                old_pred = verification_state['predicted_number']
+
+                # Effectuer le reset comme la commande /reset
+                verification_state = {
+                    'predicted_number': None, 'predicted_suit': None,
+                    'current_check': 0, 'message_id': None,
+                    'channel_id': None, 'status': None, 'base_game': None
+                }
+
+                already_predicted_games.clear()
+                predictions_enabled = True  # Réactiver les prédictions
+                last_prediction_time = now  # Réinitialiser le timer
+
+                # Notifier l'admin
+                try:
+                    await client.send_message(ADMIN_ID, f"""🚨 **RESET AUTOMATIQUE EFFECTUÉ**
+
+**Raison:** {reset_reason}
+
+✅ Système réinitialisé et prêt
+🔄 Les prédictions reprennent normalement""")
+                except Exception as e:
+                    logger.error(f"Erreur notification admin: {e}")
+
+                logger.info("✅ Reset automatique terminé - Système libéré")
+
+        except Exception as e:
+            logger.error(f"❌ Erreur dans le moniteur de reset: {e}")
+
+# ============================================================
+# COMMANDES ADMIN
+# ============================================================
+
+@client.on(events.NewMessage(pattern='/start'))
+async def cmd_start(event):
+    if event.is_group or event.is_channel:
+        return
+
+    user_id = event.sender_id
+
+    if user_id == ADMIN_ID:
+        await event.respond("""👑 **ADMINISTRATEUR**
+
+Commandes:
+/stop /resume - Contrôle prédictions
+/forcestop - Débloquer système
+/predictinfo - Statut système
+/clearverif - Débloquer manuellement
+/setchannel - Canaux
+/pausecycle - Cycle pause
+/bilan - Stats
+/reset - Reset stats
+/setsuitcycle - Cycle costumes
+/settriggermap - Mapping triggers
+/help - Aide""")
+        return
+
+    await event.respond("""👋 **Bot Baccarat - Prédictions Automatiques**
+
+🎰 Système de prédictions automatiques activé
+
+💡 /help pour plus d'informations""")
+
+@client.on(events.NewMessage(pattern='/help'))
+async def cmd_help(event):
+    if event.is_group or event.is_channel:
+        return
+
+    user_id = event.sender_id
+
+    if user_id == ADMIN_ID:
+        await event.respond("""📖 **AIDE ADMINISTRATEUR**
+
+**Contrôle:**
+/stop - Arrêter prédictions
+/resume - Reprendre prédictions  
+/forcestop - Forcer arrêt immédiat
+
+**Monitoring:**
+/predictinfo - Statut système prédiction
+/clearverif - Effacer vérification bloquée
+
+**Configuration:**
+/setchannel source ID - Canal source
+/setchannel prediction ID - Canal prédiction  
+/pausecycle - Voir/modifier cycle pause
+/setsuitcycle - Modifier cycle costumes
+/settriggermap - Modifier mapping triggers
+
+**Statistiques:**
+/bilan - Statistiques prédictions
+/reset - Reset stats
+
+**Support:** @Kouamappoloak""")
+    else:
+        await event.respond("""📖 **AIDE UTILISATEUR**
+
+/start - Voir statut
+/help - Cette aide
+
+Le bot fonctionne automatiquement et envoie les prédictions dans le canal configuré.
+
+**Support:** @Kouamappoloak""")
+
+@client.on(events.NewMessage(pattern='/stop'))
+async def cmd_stop(event):
+    if event.sender_id != ADMIN_ID:
+        return
+    global predictions_enabled
+    predictions_enabled = False
+    await event.respond("🛑 **PRÉDICTIONS ARRÊTÉES**")
+
+@client.on(events.NewMessage(pattern='/forcestop'))
+async def cmd_forcestop(event):
+    """Force l'arrêt complet et débloque le système"""
+    if event.sender_id != ADMIN_ID:
+        return
+
+    global predictions_enabled, verification_state, already_predicted_games
+
+    predictions_enabled = False
+    old_pred = verification_state['predicted_number']
+
+    verification_state = {
+        'predicted_number': None, 'predicted_suit': None,
+        'current_check': 0, 'message_id': None,
+        'channel_id': None, 'status': None, 'base_game': None
+    }
+
+    already_predicted_games.clear()
+
+    msg = "🚨 **ARRÊT FORCÉ**\n\n"
+    msg += f"🛑 Prédictions désactivées\n"
+    msg += f"🔓 Système débloqué"
+    if old_pred:
+        msg += f"\n🗑️ Prédiction #{old_pred} effacée"
+
+    await event.respond(msg)
+
+@client.on(events.NewMessage(pattern='/resume'))
+async def cmd_resume(event):
+    if event.sender_id != ADMIN_ID:
+        return
+    global predictions_enabled
+    predictions_enabled = True
+    await event.respond("🚀 **PRÉDICTIONS REPRISES**")
+
+@client.on(events.NewMessage(pattern='/predictinfo'))
+async def cmd_predictinfo(event):
+    if event.sender_id != ADMIN_ID:
+        return
+
+    verif_info = "Aucune"
+    if verification_state['predicted_number']:
+        next_check = verification_state['predicted_number'] + verification_state['current_check']
+        verif_info = f"""#{verification_state['predicted_number']} ({verification_state['predicted_suit']})
+Check: {verification_state['current_check']}/3
+Attend: #{next_check}"""
+
+    cycle_mins = [x//60 for x in pause_config['cycle']]
+    current_idx = pause_config['current_index'] % len(cycle_mins)
+    next_pause_idx = (pause_config['current_index']) % len(cycle_mins)
+
+    # Calculer temps depuis dernière prédiction
+    time_since_last = "N/A"
+    if last_prediction_time:
+        seconds = (datetime.now() - last_prediction_time).total_seconds()
+        mins = int(seconds // 60)
+        time_since_last = f"{mins} min"
+
+    await event.respond(f"""📊 **STATUT SYSTÈME**
+
+🎯 Source: #{current_game_number}
+🔍 Vérification: {verif_info}
+🟢 Prédictions: {'ON' if predictions_enabled else 'OFF'}
+⏱️ Dernière activité: {time_since_last}
+
+⏸️ **CYCLE DE PAUSE:**
+• Actif: {'Oui' if pause_config['is_paused'] else 'Non'}
+• Compteur: {pause_config['predictions_count']}/5
+• Cycle: {cycle_mins} minutes
+• Position: {current_idx + 1}/{len(cycle_mins)}
+• Prochaine pause: {cycle_mins[next_pause_idx]} min
+
+🎨 **CYCLE COSTUMES:**
+{''.join(suit_cycle_config)}
+
+📋 **MAPPING TRIGGERS:**
+{trigger_prediction_map}
+
+💡 /pausecycle pour modifier pause
+💡 /setsuitcycle pour modifier costumes
+💡 /settriggermap pour modifier triggers
+💡 /clearverif si bloqué
+💡 /forcestop pour débloquer""")
+
+@client.on(events.NewMessage(pattern='/clearverif'))
+async def cmd_clearverif(event):
+    if event.sender_id != ADMIN_ID:
+        return
+
+    global verification_state
+    old = verification_state['predicted_number']
+
+    verification_state = {
+        'predicted_number': None, 'predicted_suit': None,
+        'current_check': 0, 'message_id': None,
+        'channel_id': None, 'status': None, 'base_game': None
+    }
+
+    await event.respond(f"✅ **{'Vérification #' + str(old) + ' effacée' if old else 'Aucune vérification'}**\n🚀 Système libéré")
+
+@client.on(events.NewMessage(pattern=r'^/pausecycle(\s*[\d\s,]*)?$'))
+async def cmd_pausecycle(event):
+    """Configure le cycle de pause"""
+    if event.sender_id != ADMIN_ID:
+        return
+
+    message_text = event.message.message.strip()
+    parts = message_text.split()
+
+    if len(parts) == 1:
+        cycle_mins = [x//60 for x in pause_config['cycle']]
+        current_idx = pause_config['current_index'] % len(cycle_mins)
+
+        next_pauses = []
+        for i in range(3):
+            idx = (pause_config['current_index'] + i) % len(cycle_mins)
+            next_pauses.append(f"{cycle_mins[idx]}min")
+
+        await event.respond(f"""⏸️ **CONFIGURATION CYCLE DE PAUSE**
+
+**Cycle configuré:** {cycle_mins} minutes
+**Ordre d'exécution:** {' → '.join([f'{m}min' for m in cycle_mins])} → recommence
+
+**État actuel:**
+• Position: {current_idx + 1}/{len(cycle_mins)}
+• Compteur: {pause_config['predictions_count']}/5 prédictions
+• Prochaines pauses: {' → '.join(next_pauses)}
+
+**Modifier le cycle:**
+`/pausecycle 3,5,4` (minutes, séparées par virgule)
+`/pausecycle 5,10,7,3` (autant de valeurs que voulu)
+
+**Fonctionnement:**
+Après chaque 5 prédictions → pause selon le cycle configuré""")
+        return
+
+    try:
+        cycle_str = ' '.join(parts[1:])
+        cycle_str = cycle_str.replace(' ', '').replace(',', ',')
+        new_cycle_mins = [int(x.strip()) for x in cycle_str.split(',') if x.strip()]
+
+        if not new_cycle_mins or any(x <= 0 for x in new_cycle_mins):
+            await event.respond("❌ Le cycle doit contenir des nombres positifs (minutes)")
+            return
+
+        new_cycle = [x * 60 for x in new_cycle_mins]
+        pause_config['cycle'] = new_cycle
+        pause_config['current_index'] = 0
+        save_json(PAUSE_CONFIG_FILE, pause_config)
+
+        await event.respond(f"""✅ **CYCLE MIS À JOUR**
+
+**Nouveau cycle:** {new_cycle_mins} minutes
+**Ordre:** {' → '.join([f'{m}min' for m in new_cycle_mins])} → recommence
+
+🔄 Prochaine série: 5 prédictions puis {new_cycle_mins[0]} minutes de pause""")
+
+    except Exception as e:
+        await event.respond(f"❌ Erreur: {e}\n\nFormat: `/pausecycle 3,5,4`")
+
+@client.on(events.NewMessage(pattern=r'^/setchannel(\s+.+)?$'))
+async def cmd_setchannel(event):
+    if event.sender_id != ADMIN_ID:
+        return
+
+    parts = event.message.message.strip().split()
+
+    if len(parts) < 3:
+        await event.respond(f"""📺 **CONFIGURATION CANAUX**
+
+**Actuel:**
+• Source: `{get_source_channel_id()}`
+• Prédiction: `{get_prediction_channel_id()}`
+
+**Modifier:**
+`/setchannel source -1001234567890`
+`/setchannel prediction -1001234567890`""")
+        return
+
+    try:
+        ctype = parts[1].lower()
+        cid = int(parts[2])
+
+        if ctype == 'source':
+            set_channels(source_id=cid)
+            await event.respond(f"✅ **Canal source:**\n`{cid}`")
+
+        elif ctype == 'prediction':
+            set_channels(prediction_id=cid)
+            await event.respond(f"✅ **Canal prédiction:**\n`{cid}`\n\n🎯 Les prédictions seront envoyées ici")
+        else:
+            await event.respond("❌ Type invalide. Utilisez: source ou prediction")
+
+    except Exception as e:
+        await event.respond(f"❌ Erreur: {e}")
+
+@client.on(events.NewMessage(pattern=r'^/setsuitcycle(\s+.+)?$'))
+async def cmd_setsuitcycle(event):
+    """Configure le cycle des costumes"""
+    if event.sender_id != ADMIN_ID:
+        return
+
+    parts = event.message.message.strip().split()
+
+    if len(parts) == 1:
+        await event.respond(f"""🎨 **CONFIGURATION CYCLE COSTUMES**
+
+**Actuel:** {''.join(suit_cycle_config)}
+**Liste:** {suit_cycle_config}
+
+**Modifier:**
+`/setsuitcycle ♥ ♦ ♣ ♠ ♦ ♥ ♠ ♣`
+`/setsuitcycle ♥,♦,♣,♠`
+
+Costumes valides: ♥ ♦ ♣ ♠""")
+        return
+
+    try:
+        # Joindre tout ce qui suit la commande
+        suits_str = ' '.join(parts[1:])
+        # Nettoyer et parser
+        suits_str = suits_str.replace(',', ' ').replace('  ', ' ')
+        new_suits = [s.strip() for s in suits_str.split() if s.strip()]
+
+        # Valider
+        valid_suits = ['♥', '♦', '♣', '♠']
+        invalid = [s for s in new_suits if s not in valid_suits]
+        if invalid:
+            await event.respond(f"❌ Costumes invalides: {invalid}\\nValides: {valid_suits}")
+            return
+
+        if len(new_suits) == 0:
+            await event.respond("❌ Aucun costume fourni")
+            return
+
+        global suit_cycle_config, VALID_NUMBERS
+        suit_cycle_config = new_suits
+        save_json(SUIT_CYCLE_CONFIG_FILE, suit_cycle_config)
+
+        # Recalculer les numéros valides si nécessaire
+        VALID_NUMBERS = get_valid_numbers()
+
+        await event.respond(f"""✅ **CYCLE COSTUMES MIS À JOUR**
+
+**Nouveau cycle:** {''.join(suit_cycle_config)}
+**Longueur:** {len(suit_cycle_config)} costumes""")
+
+    except Exception as e:
+        await event.respond(f"❌ Erreur: {e}")
+
+@client.on(events.NewMessage(pattern=r'^/settriggermap(\s+.+)?$'))
+async def cmd_settriggermap(event):
+    """Configure le mapping trigger→prédiction"""
+    if event.sender_id != ADMIN_ID:
+        return
+
+    parts = event.message.message.strip().split()
+
+    if len(parts) == 1:
+        await event.respond(f"""📋 **CONFIGURATION MAPPING TRIGGERS**
+
+**Actuel:** `{trigger_prediction_map}`
+
+**Format:** `trigger:pred,trigger:pred...`
+Exemple: `1:0,3:2,5:4,7:6`
+
+Signifie:
+• Trigger finit par 1 → Prédit finit par 0
+• Trigger finit par 3 → Prédit finit par 2
+• etc.
+
+**Modifier:**
+`/settriggermap 1:0,3:2,5:4,7:6`""")
+        return
+
+    try:
+        # Parser le mapping
+        mapping_str = ''.join(parts[1:])
+        pairs = mapping_str.split(',')
+        
+        new_map = {}
+        for pair in pairs:
+            if ':' not in pair:
+                continue
+            trigger, pred = pair.split(':', 1)
+            trigger = trigger.strip()
+            pred = pred.strip()
+            if trigger and pred:
+                new_map[trigger] = pred
+
+        if len(new_map) == 0:
+            await event.respond("❌ Format invalide. Utilisez: `1:0,3:2,5:4,7:6`")
+            return
+
+        global trigger_prediction_map, VALID_NUMBERS
+        trigger_prediction_map = new_map
+        save_json(TRIGGER_PREDICTION_FILE, trigger_prediction_map)
+
+        # Recalculer les numéros valides avec le nouveau mapping
+        VALID_NUMBERS = get_valid_numbers()
+
+        await event.respond(f"""✅ **MAPPING MIS À JOUR**
+
+**Nouveau mapping:** `{trigger_prediction_map}`
+**Numéros valides recalculés:** {len(VALID_NUMBERS)}""")
+
+    except Exception as e:
+        await event.respond(f"❌ Erreur: {e}")
+
+@client.on(events.NewMessage(pattern='/bilan'))
+async def cmd_bilan(event):
+    if event.sender_id != ADMIN_ID:
+        return
+
+    if stats_bilan['total'] == 0:
+        await event.respond("📊 Aucune prédiction enregistrée")
+        return
+
+    win_rate = (stats_bilan['wins'] / stats_bilan['total']) * 100
+
+    await event.respond(f"""📊 **BILAN PRÉDICTIONS**
+
+🎯 **Total:** {stats_bilan['total']}
+✅ **Victoires:** {stats_bilan['wins']} ({win_rate:.1f}%)
+❌ **Défaites:** {stats_bilan['losses']}
+
+**Détails victoires:**
+• Immédiat (N): {stats_bilan['win_details'].get('✅0️⃣', 0)}
+• 2ème chance (N+1): {stats_bilan['win_details'].get('✅1️⃣', 0)}
+• 3ème chance (N+2): {stats_bilan['win_details'].get('✅2️⃣', 0)}
+• 4ème chance (N+3): {stats_bilan['win_details'].get('✅3️⃣', 0)}""")
+
+@client.on(events.NewMessage(pattern='/reset'))
+async def cmd_reset(event):
+    """Reset uniquement les stats"""
+    if event.sender_id != ADMIN_ID:
+        return
+
+    global stats_bilan, already_predicted_games, verification_state, last_prediction_time
+
+    old_pred = verification_state['predicted_number']
+
+    stats_bilan = {
+        'total': 0, 'wins': 0, 'losses': 0,
+        'win_details': {'✅0️⃣': 0, '✅1️⃣': 0, '✅2️⃣': 0, '✅3️⃣': 0},
+        'loss_details': {'❌': 0}
+    }
+
+    already_predicted_games.clear()
+
+    verification_state = {
+        'predicted_number': None, 'predicted_suit': None,
+        'current_check': 0, 'message_id': None,
+        'channel_id': None, 'status': None, 'base_game': None
+    }
+
+    last_prediction_time = datetime.now()
+
+    await event.respond(f"""🚨 **RESET EFFECTUÉ**
+
+✅ **Réinitialisé:**
+• Statistiques prédictions
+• Historique prédictions{f" (#{old_pred})" if old_pred else ""}
+• Système de vérification débloqué
+• Timer de surveillance réinitialisé
+
+🚀 Système prêt!""")
+
+# ============================================================
+# GESTION MESSAGES SOURCE
+# ============================================================
+
+@client.on(events.NewMessage)
+async def handle_messages(event):
+    # Canal source
+    if event.is_group or event.is_channel:
+        if event.chat_id == get_source_channel_id():
+            await process_source_message(event)
+        return
+
+    # Commandes ignorées
+    if event.message.message.startswith('/'):
+        return
+
+@client.on(events.MessageEdited)
+async def handle_edit(event):
+    if event.is_group or event.is_channel:
+        if event.chat_id == get_source_channel_id():
+            await process_source_message(event, is_edit=True)
+
+# ============================================================
+# SERVEUR WEB
+# ============================================================
+
+async def web_index(request):
+    cycle_mins = [x//60 for x in pause_config['cycle']]
+    current_idx = pause_config['current_index'] % len(cycle_mins)
+
+    time_since_last = "N/A"
+    if last_prediction_time:
+        seconds = (datetime.now() - last_prediction_time).total_seconds()
+        mins = int(seconds // 60)
+        time_since_last = f"{mins} min"
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head><title>Bot Baccarat</title>
+<style>
+body {{ font-family: Arial; background: linear-gradient(135deg, #1e3c72, #2a5298); color: white; text-align: center; padding: 50px; }}
+.status {{ background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; display: inline-block; margin: 10px; min-width: 120px; }}
+.number {{ font-size: 2em; color: #ffd700; font-weight: bold; }}
+.label {{ font-size: 0.9em; opacity: 0.8; margin-bottom: 5px; }}
+</style></head>
+<body>
+<h1>🎰 Bot Baccarat</h1>
+<div class="status"><div class="label">Jeu Actuel</div><div class="number">#{current_game_number}</div></div>
+<div class="status"><div class="label">Vérification</div><div class="number">{verification_state['predicted_number'] or 'Libre'}</div></div>
+<div class="status"><div class="label">Prédictions</div><div class="number">{'🟢 ON' if predictions_enabled else '🔴 OFF'}</div></div>
+<div class="status"><div class="label">Dernière Activité</div><div class="number">{time_since_last}</div></div>
+<div class="status"><div class="label">Pause</div><div class="number">{pause_config['predictions_count']}/5</div></div>
+<p style="margin-top: 30px; opacity: 0.8;">
+⏸️ Cycle: {cycle_mins} min | Position: {current_idx + 1}/{len(cycle_mins)} | {'⏸️ EN PAUSE' if pause_config['is_paused'] else '▶️ ACTIF'}
+</p>
+<p>🎨 Costumes: {''.join(suit_cycle_config)}</p>
+<p>📋 Mapping: {trigger_prediction_map}</p>
+<p>🔄 {datetime.now().strftime('%H:%M:%S')}</p>
+</body></html>"""
+    return web.Response(text=html, content_type='text/html')
+
+async def start_web():
+    app = web.Application()
+    app.router.add_get('/', web_index)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', PORT).start()
+
+# ============================================================
+# DÉMARRAGE
+# ============================================================
+
+async def main():
+    global auto_reset_task, last_prediction_time
+
+    load_all_configs()
+    await start_web()
+    await client.start(bot_token=BOT_TOKEN)
+
+    # Initialiser le timer au démarrage
+    last_prediction_time = datetime.now()
+
+    # Démarrer le moniteur de reset automatique
+    auto_reset_task = asyncio.create_task(auto_reset_monitor())
+
+    cycle_mins = [x//60 for x in pause_config['cycle']]
+
+    logger.info("=" * 60)
+    logger.info("🚀 BOT BACCARAT DÉMARRÉ")
+    logger.info(f"👑 Admin ID: {ADMIN_ID}")
+    logger.info(f"📺 Source: {get_source_channel_id()}")
+    logger.info(f"🎯 Prédiction: {get_prediction_channel_id()}")
+    logger.info(f"⏸️ Cycle pause: {cycle_mins} min")
+    logger.info(f"⏸️ Position cycle: {(pause_config['current_index'] % len(cycle_mins)) + 1}/{len(cycle_mins)}")
+    logger.info(f"🎨 Cycle costumes: {suit_cycle_config}")
+    logger.info(f"📋 Mapping triggers: {trigger_prediction_map}")
+    logger.info(f"🔄 Reset automatique: ACTIVÉ (20 min)")
+    logger.info("=" * 60)
+
+    await client.run_until_disconnected()
+
+if __name__ == '__main__':
+    asyncio.run(main())

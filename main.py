@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Bot Telegram de Prediction - CORRIGÉ v2
-Logique: Cibles _3,_5 (impairs) et _0,_8 (pairs) - FINS DE NUMÉRO
-Déclencheurs: _2,_4,_9,_7 - FINS DE NUMÉRO
+Bot Telegram de Prediction - CORRIGÉ v3
+Logique: Cibles _3,_5 (impairs) et _0,_8 (pairs)
+Déclencheurs: _2,_4,_9,_7
 Port: 10000
 """
 import os
@@ -43,13 +43,13 @@ EXCLUDED_NUMBERS = set(
 )
 
 # Configuration des FINS DE NUMÉRO (derniers chiffres)
+# Déclencheur: Cible (le numéro prédit doit être SUPÉRIEUR au déclencheur)
 TARGET_CONFIG = {
     'impairs': [3, 5],      # Fins de numéro impairs à prédire
     'pairs': [0, 8],        # Fins de numéro pairs à prédire
-    'triggers': {2: 3, 4: 5, 9: 0, 7: 8}  # Déclencheur: Cible (fins de numéro)
+    'triggers': {2: 3, 4: 5, 9: 0, 7: 8}  # Déclencheur: Cible
 }
 
-# Cycle des costumes
 SUIT_CYCLE = ['♦️', '♣️', '❤️', '♠️', '♦️', '❤️', '♠️', '♣️']
 SUIT_DISPLAY = {'♦️': '♦️ Carreau', '❤️': '❤️ Coeur', '♣️': '♣️ Trefle', '♠️': '♠️ Pique'}
 
@@ -125,9 +125,10 @@ def extract_suits_from_first_group(message_text):
         return []
 
     first_group = matches[0]
+    
+    # Normalisation des variantes de cœurs
     normalized = first_group.replace('❤️', '♥️').replace('❤', '♥️')
     normalized = normalized.replace('♠️', '♠️').replace('♦️', '♦️').replace('♣️', '♣️')
-    normalized = normalized.replace('♥️', '♥️')
 
     suits = []
     for suit in ['♥️', '♠️', '♦️', '♣️']:
@@ -152,20 +153,34 @@ def is_target_last_digit(last_digit, is_odd):
         return last_digit in TARGET_CONFIG['pairs']
 
 def get_trigger_target(trigger_num):
-    """Calcule la cible a partir du declencheur"""
+    """
+    Calcule la cible à partir du déclencheur
+    Le numéro prédit doit être SUPÉRIEUR au numéro déclencheur
+    """
     last_digit = get_last_digit(trigger_num)
     target_last = TARGET_CONFIG['triggers'].get(last_digit)
 
     if target_last is None:
         return None
 
-    # Calculer le numéro cible en remplaçant le dernier chiffre
-    target = (trigger_num // 10) * 10 + target_last
+    # Calculer le numéro cible
+    base = (trigger_num // 10) * 10
+    target = base + target_last
 
-    if target == 0:
-        target = trigger_num + 1
-        if not is_target_last_digit(get_last_digit(target), target % 2 == 1):
-            return None
+    # CORRECTION: Si la cible est inférieure ou égale au déclencheur, 
+    # on passe à la dizaine suivante
+    if target <= trigger_num:
+        target = base + 10 + target_last
+        logger.info(f"🔄 Cible ajustée: {base + target_last} → {target} (doit être > {trigger_num})")
+
+    # Vérifier que la cible a une fin valide
+    if not is_target_last_digit(get_last_digit(target), target % 2 == 1):
+        return None
+        
+    # Vérifier que la cible n'est pas exclue
+    if target in EXCLUDED_NUMBERS:
+        logger.info(f"🚫 Cible #{target} exclue")
+        return None
 
     return target
 
@@ -178,13 +193,12 @@ def get_next_suit():
     return suit
 
 def format_prediction(number, suit, status=None, emoji="⏳"):
-    """Formate le message de prediction"""
-    last_digit = get_last_digit(number)
+    """Formate le message de prediction SANS (fin: _X)"""
     if status:
-        return f"""🎰 **PRÉDICTION #{number}** (fin: _{last_digit})
+        return f"""🎰 **PRÉDICTION #{number}**
 🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
 📊 Statut: {emoji} {status}"""
-    return f"""🎰 **PRÉDICTION #{number}** (fin: _{last_digit})
+    return f"""🎰 **PRÉDICTION #{number}**
 🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
 ⏳ Statut: EN ATTENTE DU RÉSULTAT..."""
 
@@ -245,7 +259,7 @@ async def start_pause():
     minutes = random.choice(PAUSE_MINUTES)
     bot_state['is_paused'] = True
     bot_state['pause_end'] = datetime.now() + timedelta(minutes=minutes)
-    msg = f"Pause de {minutes}min"
+    msg = f"⏸️ Pause de {minutes} min"
     await bot_client.send_message(PREDICTION_CHANNEL_ID, msg)
     await bot_client.send_message(ADMIN_ID, f"⏸️ {msg}")
     logger.info(f"Pause {minutes} min")
@@ -277,7 +291,7 @@ async def check_prediction_timeout(current_game):
             
             await bot_client.send_message(
                 ADMIN_ID, 
-                f"⚠️ Prédiction #{predicted_num} expirée (délai dépassé). Système libéré."
+                f"⚠️ Prédiction #{predicted_num} expirée. Système libéré."
             )
             
         except Exception as e:
@@ -322,7 +336,9 @@ async def send_prediction(target_game, predicted_suit, base_game):
             'timestamp': datetime.now().strftime('%H:%M:%S')
         })
 
-        logger.info(f"🚀 PRÉDICTION #{target_game} (fin _{get_last_digit(target_game)}) LANCÉE")
+        trigger_last = get_last_digit(base_game)
+        target_last = get_last_digit(target_game)
+        logger.info(f"🚀 PRÉDICTION #{target_game} lancée (déclencheur #{base_game} _{trigger_last} → cible _{target_last})")
         return True
 
     except Exception as e:
@@ -375,7 +391,7 @@ async def update_prediction_status(status):
         return False
 
 async def process_verification_step(game_number, message_text):
-    """Traite UNE étape de vérification"""
+    """Traite UNE étape de vérification - regarde UNIQUEMENT le premier groupe"""
     if verification_state['predicted_number'] is None:
         return
 
@@ -388,21 +404,25 @@ async def process_verification_step(game_number, message_text):
         logger.warning(f"⚠️ Reçu #{game_number} != attendu #{expected_number}")
         return
 
+    # EXTRAIRE UNIQUEMENT LES COSTUMES DU PREMIER GROUPE
     suits = extract_suits_from_first_group(message_text)
-    logger.info(f"🔍 Vérification #{game_number}: {suits}, attendu {predicted_suit}")
+    logger.info(f"🔍 Vérification #{game_number}: premier groupe = {suits}, attendu = {predicted_suit}")
 
-    if predicted_suit in suits:
+    # Normaliser le costume prédit pour comparaison
+    predicted_normalized = predicted_suit.replace('❤️', '♥️').replace('❤', '♥️')
+
+    if predicted_normalized in suits:
         status = f"✅{current_check}️⃣"
-        logger.info(f"🎉 GAGNÉ au check {current_check}")
+        logger.info(f"🎉 GAGNÉ! Costume {predicted_suit} trouvé dans premier groupe au check {current_check}")
         await update_prediction_status(status)
         return
 
     if current_check < 3:
         verification_state['current_check'] += 1
         next_num = predicted_num + verification_state['current_check']
-        logger.info(f"❌ Check {current_check} échoué, prochain: #{next_num}")
+        logger.info(f"❌ Check {current_check} échoué sur #{game_number}, prochain: #{next_num}")
     else:
-        logger.info(f"💔 PERDU après 4 vérifications")
+        logger.info(f"💔 PERDU après 4 vérifications (jusqu'à #{game_number})")
         await update_prediction_status("❌")
 
 async def check_and_launch_prediction(game_number):
@@ -421,27 +441,20 @@ async def check_and_launch_prediction(game_number):
     # Vérifier la FIN DE NUMÉRO (dernier chiffre)
     last_digit = get_last_digit(game_number)
     
-    # Vérifier si c'est un déclencheur (fins de numéro définies dans triggers)
+    # Vérifier si c'est un déclencheur
     if last_digit not in TARGET_CONFIG['triggers']:
-        logger.info(f"ℹ️ #{game_number} (fin _{last_digit}) pas un déclencheur")
+        logger.info(f"ℹ️ #{game_number} (_{last_digit}) pas un déclencheur")
         return
 
-    # Calculer la cible (changer le dernier chiffre)
+    # Calculer la cible (le numéro prédit doit être SUPÉRIEUR)
     target_num = get_trigger_target(game_number)
     if not target_num:
-        logger.warning(f"⚠️ Pas de cible pour #{game_number} (fin _{last_digit})")
+        logger.warning(f"⚠️ Pas de cible valide pour #{game_number}")
         return
 
-    if target_num in EXCLUDED_NUMBERS:
-        logger.info(f"🚫 Cible #{target_num} exclue")
-        return
-
-    # Vérifier que la cible a bien une fin de numéro valide
-    target_last = get_last_digit(target_num)
-    is_target_odd = target_num % 2 == 1
-    
-    if not is_target_last_digit(target_last, is_target_odd):
-        logger.info(f"🚫 Cible #{target_num} (fin _{target_last}) invalide")
+    # Vérifier que la cible est bien supérieure
+    if target_num <= game_number:
+        logger.error(f"❌ ERREUR: Cible #{target_num} <= déclencheur #{game_number}")
         return
 
     suit = get_next_suit()
@@ -469,7 +482,7 @@ async def process_source_message(event, is_edit=False):
 
         log_type = "ÉDITÉ" if is_edit else "NOUVEAU"
         log_status = "⏰" if is_editing else ("✅" if is_finalized else "📝")
-        logger.info(f"📩 {log_status} {log_type}: #{game_number} (fin _{last_digit})")
+        logger.info(f"📩 {log_status} {log_type}: #{game_number} (_{last_digit})")
 
         bot_state['last_source_number'] = game_number
 
@@ -511,7 +524,7 @@ async def process_source_message(event, is_edit=False):
         logger.error(traceback.format_exc())
 
 # ============================================================
-# COMMANDES ADMIN (AVEC NOUVELLES COMMANDES)
+# COMMANDES ADMIN
 # ============================================================
 
 async def handle_admin_commands(event):
@@ -527,14 +540,14 @@ async def handle_admin_commands(event):
             await event.respond("""🤖 Commandes disponibles:
 
 **Configuration des fins de numéro:**
-/settargets <impairs> <pairs> - Modifier fins à prédire (ex: /settargets 3,5 0,8)
-/settriggers <liste> - Modifier fins déclencheurs (ex: /settriggers 2,4,9,7)
-/setmapping <map> - Modifier mapping déclencheur→cible (ex: /setmapping 2:3,4:5,9:0,7:8)
+/settargets <impairs> <pairs> - Fins à prédire (ex: /settargets 3,5 0,8)
+/settriggers <liste> - Fins déclencheurs (ex: /settriggers 2,4,9,7)
+/setmapping <map> - Mapping déclencheur→cible (ex: /setmapping 2:3,4:5,9:0,7:8)
 
 **Configuration du cycle:**
-/setcycle <emojis> - Modifier cycle costumes (ex: /setcycle ♦️ ♣️ ❤️ ♠️)
-/addsuit <emoji> - Ajouter un costume au cycle
-/removesuit <position> - Retirer un costume du cycle
+/setcycle <emojis> - Cycle costumes (ex: /setcycle ♦️ ♣️ ❤️ ♠️)
+/addsuit <emoji> - Ajouter costume
+/removesuit <pos> - Retirer costume
 
 **Gestion:**
 /reset - Reset complet
@@ -545,19 +558,12 @@ async def handle_admin_commands(event):
 /next - Prochain costume
 /timeout <n> - Changer timeout""")
 
-        # ============================================================
-        # COMMANDES DE CONFIGURATION DES FINS DE NUMÉRO
-        # ============================================================
-
         elif cmd == '/settargets':
-            """Modifie les fins de numéro à prédire (impairs et pairs)"""
             if len(parts) < 3:
                 await event.respond(
-                    f"📋 **Usage:** `/settargets <impairs> <pairs>`\n\n"
-                    f"**Exemple:** `/settargets 3,5 0,8`\n"
-                    f"**Actuel:**\n"
-                    f"• Impairs: {TARGET_CONFIG['impairs']}\n"
-                    f"• Pairs: {TARGET_CONFIG['pairs']}"
+                    f"📋 Usage: `/settargets <impairs> <pairs>`\n"
+                    f"Ex: `/settargets 3,5 0,8`\n"
+                    f"Actuel: Impairs {TARGET_CONFIG['impairs']}, Pairs {TARGET_CONFIG['pairs']}"
                 )
                 return
 
@@ -565,53 +571,46 @@ async def handle_admin_commands(event):
                 impairs = [int(x.strip()) for x in parts[1].split(',') if x.strip()]
                 pairs = [int(x.strip()) for x in parts[2].split(',') if x.strip()]
                 
-                # Validation
                 for d in impairs:
                     if d < 0 or d > 9 or d % 2 == 0:
-                        await event.respond(f"❌ {d} n'est pas un chiffre impair valide (1,3,5,7,9)")
+                        await event.respond(f"❌ {d} n'est pas impair (1,3,5,7,9)")
                         return
                 
                 for d in pairs:
                     if d < 0 or d > 9 or d % 2 == 1:
-                        await event.respond(f"❌ {d} n'est pas un chiffre pair valide (0,2,4,6,8)")
+                        await event.respond(f"❌ {d} n'est pas pair (0,2,4,6,8)")
                         return
 
                 TARGET_CONFIG['impairs'] = impairs
                 TARGET_CONFIG['pairs'] = pairs
                 
                 await event.respond(
-                    f"✅ **Fins de numéro à prédire modifiées!**\n\n"
-                    f"🎯 **Impairs:** {impairs}\n"
-                    f"🎯 **Pairs:** {pairs}\n\n"
-                    f"Les numéros se terminant par ces chiffres seront prédits."
+                    f"✅ Fins de numéro à prédire modifiées!\n"
+                    f"🎯 Impairs: {impairs}\n"
+                    f"🎯 Pairs: {pairs}"
                 )
-                logger.info(f"Fins cibles modifiées - Impairs: {impairs}, Pairs: {pairs}")
 
             except Exception as e:
                 await event.respond(f"❌ Erreur: {e}")
 
         elif cmd == '/settriggers':
-            """Modifie les fins de numéro déclencheurs"""
             if len(parts) < 2:
                 current_triggers = list(TARGET_CONFIG['triggers'].keys())
                 await event.respond(
-                    f"📋 **Usage:** `/settriggers <liste>`\n\n"
-                    f"**Exemple:** `/settriggers 2,4,9,7`\n"
-                    f"**Actuel:** {current_triggers}\n\n"
-                    f"⚠️ Cela remplace tous les déclencheurs existants!"
+                    f"📋 Usage: `/settriggers <liste>`\n"
+                    f"Ex: `/settriggers 2,4,9,7`\n"
+                    f"Actuel: {current_triggers}"
                 )
                 return
 
             try:
                 new_triggers = [int(x.strip()) for x in parts[1].split(',') if x.strip()]
                 
-                # Validation
                 for d in new_triggers:
                     if d < 0 or d > 9:
-                        await event.respond(f"❌ {d} n'est pas un chiffre valide (0-9)")
+                        await event.respond(f"❌ {d} invalide (0-9)")
                         return
 
-                # Garder les mappings existants pour les déclencheurs communs
                 old_mapping = TARGET_CONFIG['triggers'].copy()
                 new_mapping = {}
                 
@@ -619,33 +618,26 @@ async def handle_admin_commands(event):
                     if trigger in old_mapping:
                         new_mapping[trigger] = old_mapping[trigger]
                     else:
-                        # Par défaut: déclencheur + 1 (avec gestion du cycle 9→0)
                         default_target = (trigger + 1) % 10
                         new_mapping[trigger] = default_target
                 
                 TARGET_CONFIG['triggers'] = new_mapping
                 
-                trigger_list = list(new_mapping.keys())
                 await event.respond(
-                    f"✅ **Déclencheurs modifiés!**\n\n"
-                    f"🔗 **Fins déclencheurs:** {trigger_list}\n"
-                    f"🎯 **Mapping actuel:** {new_mapping}\n\n"
-                    f"💡 Utilisez `/setmapping` pour changer les cibles associées."
+                    f"✅ Déclencheurs: {list(new_mapping.keys())}\n"
+                    f"🎯 Mapping: {new_mapping}"
                 )
-                logger.info(f"Déclencheurs modifiés: {trigger_list}")
 
             except Exception as e:
                 await event.respond(f"❌ Erreur: {e}")
 
         elif cmd == '/setmapping':
-            """Modifie le mapping déclencheur → cible"""
             if len(parts) < 2:
                 await event.respond(
-                    f"📋 **Usage:** `/setmapping <map>`\n\n"
-                    f"**Format:** `déclencheur:cible,déclencheur:cible,...`\n"
-                    f"**Exemple:** `/setmapping 2:3,4:5,9:0,7:8`\n"
-                    f"**Actuel:** {TARGET_CONFIG['triggers']}\n\n"
-                    f"Signification: quand fin de numéro=X, prédire fin de numéro=Y"
+                    f"📋 Usage: `/setmapping <map>`\n"
+                    f"Format: déclencheur:cible,...\n"
+                    f"Ex: `/setmapping 2:3,4:5,9:0,7:8`\n"
+                    f"Actuel: {TARGET_CONFIG['triggers']}"
                 )
                 return
 
@@ -655,7 +647,7 @@ async def handle_admin_commands(event):
                 
                 for pair in pairs:
                     if ':' not in pair:
-                        await event.respond(f"❌ Format invalide pour '{pair}'. Utilisez déclencheur:cible")
+                        await event.respond(f"❌ Format invalide: {pair}")
                         return
                     
                     t, c = pair.split(':')
@@ -663,39 +655,25 @@ async def handle_admin_commands(event):
                     cible = int(c.strip())
                     
                     if not (0 <= trigger <= 9 and 0 <= cible <= 9):
-                        await event.respond(f"❌ Les chiffres doivent être entre 0 et 9")
+                        await event.respond(f"❌ Chiffres 0-9 uniquement")
                         return
                     
                     new_mapping[trigger] = cible
                 
                 TARGET_CONFIG['triggers'] = new_mapping
                 
-                # Créer un affichage lisible
-                mapping_text = "\n".join([f"  • _{k} → _{v}" for k, v in sorted(new_mapping.items())])
-                
-                await event.respond(
-                    f"✅ **Mapping modifié!**\n\n"
-                    f"**Correspondances:**\n{mapping_text}\n\n"
-                    f"Quand le canal envoie un numéro finissant par X, le bot prédit un numéro finissant par Y."
-                )
-                logger.info(f"Mapping modifié: {new_mapping}")
+                mapping_text = "\n".join([f"  _{k} → _{v}" for k, v in sorted(new_mapping.items())])
+                await event.respond(f"✅ Mapping modifié:\n{mapping_text}")
 
             except Exception as e:
                 await event.respond(f"❌ Erreur: {e}")
 
-        # ============================================================
-        # COMMANDES DE CONFIGURATION DU CYCLE
-        # ============================================================
-
         elif cmd == '/setcycle':
-            """Remplace complètement le cycle des costumes"""
             if len(parts) < 2:
                 await event.respond(
-                    f"📋 **Usage:** `/setcycle <emojis...>`\n\n"
-                    f"**Exemple:** `/setcycle ♦️ ♣️ ❤️ ♠️`\n"
-                    f"**Actuel:** {' '.join(bot_state['cycle'])}\n"
-                    f"**Position:** {bot_state['cycle_pos']}/{len(bot_state['cycle'])}\n\n"
-                    f"Costumes valides: ♦️ ♣️ ❤️ ♠️"
+                    f"📋 Usage: `/setcycle <emojis...>`\n"
+                    f"Ex: `/setcycle ♦️ ♣️ ❤️ ♠️`\n"
+                    f"Actuel: {' '.join(bot_state['cycle'])}"
                 )
                 return
 
@@ -704,151 +682,103 @@ async def handle_admin_commands(event):
             invalid = [s for s in new_cycle if s not in valid]
 
             if invalid:
-                await event.respond(f"❌ Costumes invalides: {invalid}\nValides: {valid}")
+                await event.respond(f"❌ Invalides: {invalid}")
                 return
 
             bot_state['cycle'] = new_cycle
             bot_state['cycle_pos'] = 0
-            await event.respond(
-                f"✅ **Cycle modifié!**\n\n"
-                f"🎨 **Nouveau cycle:** {' '.join(new_cycle)}\n"
-                f"📍 **Position reset:** 0/{len(new_cycle)}\n"
-                f"🎯 **Prochain:** {new_cycle[0] if new_cycle else 'N/A'}"
-            )
-            logger.info(f"Cycle modifié: {new_cycle}")
+            await event.respond(f"✅ Cycle: {' '.join(new_cycle)}")
 
         elif cmd == '/addsuit':
-            """Ajoute un costume à la fin du cycle"""
             if len(parts) < 2:
-                await event.respond(
-                    f"📋 **Usage:** `/addsuit <emoji>`\n\n"
-                    f"**Exemple:** `/addsuit ♦️`\n"
-                    f"**Cycle actuel:** {' '.join(bot_state['cycle'])}"
-                )
+                await event.respond(f"📋 Usage: `/addsuit <emoji>`\nActuel: {' '.join(bot_state['cycle'])}")
                 return
 
             suit = parts[1]
             valid = ['♦️', '❤️', '♣️', '♠️']
             
             if suit not in valid:
-                await event.respond(f"❌ Costume invalide. Valides: {valid}")
+                await event.respond(f"❌ Valides: {valid}")
                 return
             
             bot_state['cycle'].append(suit)
-            await event.respond(
-                f"✅ **Costume ajouté!**\n\n"
-                f"🎨 **Cycle:** {' '.join(bot_state['cycle'])}\n"
-                f"📍 **Position:** {bot_state['cycle_pos']}/{len(bot_state['cycle'])}"
-            )
+            await event.respond(f"✅ Ajouté! Cycle: {' '.join(bot_state['cycle'])}")
 
         elif cmd == '/removesuit':
-            """Retire un costume du cycle par position"""
             if len(parts) < 2:
                 cycle_str = " ".join([f"{i}:{s}" for i, s in enumerate(bot_state['cycle'])])
-                await event.respond(
-                    f"📋 **Usage:** `/removesuit <position>`\n\n"
-                    f"**Exemple:** `/removesuit 0` (retire le premier)\n"
-                    f"**Cycle actuel:** {cycle_str}\n"
-                    f"**Positions:** 0 à {len(bot_state['cycle'])-1}"
-                )
+                await event.respond(f"📋 Usage: `/removesuit <position>`\n{cycle_str}")
                 return
 
             try:
                 pos = int(parts[1])
                 if pos < 0 or pos >= len(bot_state['cycle']):
-                    await event.respond(f"❌ Position invalide. Utilisez 0-{len(bot_state['cycle'])-1}")
+                    await event.respond(f"❌ Position 0-{len(bot_state['cycle'])-1}")
                     return
                 
                 removed = bot_state['cycle'].pop(pos)
-                
-                # Ajuster la position si nécessaire
                 if bot_state['cycle_pos'] >= len(bot_state['cycle']):
                     bot_state['cycle_pos'] = 0
                 
-                await event.respond(
-                    f"✅ **Costume retiré!**\n\n"
-                    f"🗑️ Retiré: {removed} (position {pos})\n"
-                    f"🎨 **Nouveau cycle:** {' '.join(bot_state['cycle'])}\n"
-                    f"📍 **Position:** {bot_state['cycle_pos']}/{len(bot_state['cycle'])}"
-                )
-                logger.info(f"Costume {removed} retiré du cycle")
+                await event.respond(f"✅ {removed} retiré! Cycle: {' '.join(bot_state['cycle'])}")
 
             except Exception as e:
                 await event.respond(f"❌ Erreur: {e}")
 
-        # ============================================================
-        # COMMANDES DE GESTION
-        # ============================================================
-
         elif cmd == '/reset':
-            """Reset complet"""
             old_pred = verification_state['predicted_number']
-
             bot_state['predictions_count'] = 0
             bot_state['is_paused'] = False
             bot_state['pause_end'] = None
             bot_state['cycle_pos'] = 0
-
             reset_verification_state()
-
             await event.respond(f"🔄 RESET!{f' (prédiction #{old_pred} effacée)' if old_pred else ''} Système libéré!")
-            logger.info("RESET exécuté")
 
         elif cmd == '/forceunlock':
-            """Force le déblocage immédiat"""
             old_pred = verification_state['predicted_number']
             reset_verification_state()
-            await event.respond(f"🔓 FORCÉ! Prédiction #{old_pred} annulée. Système libre!")
-            logger.info("FORCE UNLOCK exécuté")
+            await event.respond(f"🔓 FORCÉ! #{old_pred} annulée. Système libre!")
 
         elif cmd == '/timeout':
-            """Change le timeout"""
             global PREDICTION_TIMEOUT
             if len(parts) < 2:
-                await event.respond(f"📋 Usage: `/timeout <nombre>`\nActuel: {PREDICTION_TIMEOUT} jeux")
+                await event.respond(f"📋 Usage: `/timeout <n>`\nActuel: {PREDICTION_TIMEOUT}")
                 return
             
             try:
                 new_timeout = int(parts[1])
                 if new_timeout < 3 or new_timeout > 50:
-                    await event.respond("❌ Timeout doit être entre 3 et 50")
+                    await event.respond("❌ Entre 3 et 50")
                     return
                 PREDICTION_TIMEOUT = new_timeout
-                await event.respond(f"✅ Timeout changé à {PREDICTION_TIMEOUT} jeux")
+                await event.respond(f"✅ Timeout: {PREDICTION_TIMEOUT} jeux")
             except ValueError:
-                await event.respond("❌ Veuillez entrer un nombre valide")
+                await event.respond("❌ Nombre invalide")
 
         elif cmd == '/info':
-            """Info complète"""
             last_src = bot_state['last_source_number']
             last_pred = bot_state['last_prediction_number']
             current_pred = verification_state['predicted_number']
 
             status = "⏸️ PAUSE" if bot_state['is_paused'] else "▶️ ACTIF"
-
             verif_info = "Aucune"
             if current_pred:
                 next_check = current_pred + verification_state['current_check']
                 remaining = PREDICTION_TIMEOUT - (last_src - current_pred)
-                verif_info = f"#{current_pred} (check {verification_state['current_check']}/3, attend #{next_check}, timeout dans {remaining} jeux)"
+                verif_info = f"#{current_pred} (check {verification_state['current_check']}/3, attend #{next_check}, timeout {remaining})"
 
-            # Mapping formaté
             mapping_text = "\n".join([f"    _{k} → _{v}" for k, v in sorted(TARGET_CONFIG['triggers'].items())])
 
-            msg = f"""📊 **STATUT SYSTÈME**
+            msg = f"""📊 **STATUT**
 
 🟢 **État:** {status}
-🎯 **Dernier source:** #{last_src} (fin _{get_last_digit(last_src)})
+🎯 **Dernier source:** #{last_src} (_{get_last_digit(last_src)})
 🔍 **Dernière prédiction:** #{last_pred if last_pred else 'Aucune'}
 🔎 **Vérification:** {verif_info}
-📊 **Compteur pause:** {bot_state['predictions_count']}/{PAUSE_AFTER}
-⏱️ **Timeout:** {PREDICTION_TIMEOUT} jeux
+📊 **Pause:** {bot_state['predictions_count']}/{PAUSE_AFTER}
 
-🎯 **FINS DE NUMÉRO À PRÉDIRE:**
-   • Impairs: {TARGET_CONFIG['impairs']}
-   • Pairs: {TARGET_CONFIG['pairs']}
-
-🔗 **DÉCLENCHEURS (fin → cible):**
+🎯 **CIBLES:** Impairs {TARGET_CONFIG['impairs']} | Pairs {TARGET_CONFIG['pairs']}
+🔗 **MAPPING:**
 {mapping_text}
 
 🎨 **Cycle:** {' '.join(bot_state['cycle'])}
@@ -858,7 +788,7 @@ async def handle_admin_commands(event):
 
             if bot_state['is_paused'] and bot_state['pause_end']:
                 remaining = bot_state['pause_end'] - datetime.now()
-                msg += f"\n\n⏸️ **Pause:** {remaining.seconds // 60} min restantes"
+                msg += f"\n\n⏸️ **Pause:** {remaining.seconds // 60} min"
 
             await event.respond(msg)
 
@@ -869,23 +799,22 @@ async def handle_admin_commands(event):
                 next_suit = cycle[pos % len(cycle)]
                 await event.respond(f"🎯 Prochain: {SUIT_DISPLAY.get(next_suit, next_suit)}")
             else:
-                await event.respond("❌ Cycle vide!")
+                await event.respond("❌ Cycle vide")
 
         elif cmd == '/bilan':
             if stats_bilan['total'] == 0:
-                await event.respond("📊 Aucune prédiction enregistrée")
+                await event.respond("📊 Aucune prédiction")
                 return
 
             win_rate = (stats_bilan['wins'] / stats_bilan['total']) * 100
-
-            await event.respond(f"""📊 **BILAN PRÉDICTIONS**
+            await event.respond(f"""📊 **BILAN**
 
 🎯 **Total:** {stats_bilan['total']}
 ✅ **Victoires:** {stats_bilan['wins']} ({win_rate:.1f}%)
 ❌ **Défaites:** {stats_bilan['losses']}
 
-**Détails victoires:**
-• Immédiat (N): {stats_bilan['win_details'].get('✅0️⃣', 0)}
+**Détails:**
+• N: {stats_bilan['win_details'].get('✅0️⃣', 0)}
 • N+1: {stats_bilan['win_details'].get('✅1️⃣', 0)}
 • N+2: {stats_bilan['win_details'].get('✅2️⃣', 0)}
 • N+3: {stats_bilan['win_details'].get('✅3️⃣', 0)}""")
@@ -934,27 +863,19 @@ async def start_bot():
             if event.sender_id == ADMIN_ID:
                 await handle_admin_commands(event)
 
-        # Mapping formaté pour le startup
         mapping_text = "\n".join([f"  _{k} → _{v}" for k, v in sorted(TARGET_CONFIG['triggers'].items())])
 
-        startup = f"""🤖 **BOT PRÉDICTION DÉMARRÉ** (v2 - Fins de numéro)
+        startup = f"""🤖 **BOT PRÉDICTION DÉMARRÉ** (v3 - Corrigé)
 
-🎯 **Fins à prédire:** Impairs {TARGET_CONFIG['impairs']} | Pairs {TARGET_CONFIG['pairs']}
-🔗 **Mapping déclencheurs:**
+🎯 **Cibles:** Impairs {TARGET_CONFIG['impairs']} | Pairs {TARGET_CONFIG['pairs']}
+🔗 **Mapping:**
 {mapping_text}
 
+⚠️ **Le numéro prédit est TOUJOURS supérieur au déclencheur**
 🎨 **Cycle:** {' '.join(bot_state['cycle'])}
-⏸️ **Pause:** {PAUSE_AFTER} prédictions ({min(PAUSE_MINUTES)}-{max(PAUSE_MINUTES)} min)
 ⏱️ **Timeout:** {PREDICTION_TIMEOUT} jeux
 
-**Nouvelles commandes:**
-• /settargets <impairs> <pairs> - Fins de numéro à prédire
-• /settriggers <liste> - Fins déclencheurs
-• /setmapping <map> - Mapping déclencheur→cible
-• /setcycle <emojis> - Cycle costumes
-• /addsuit /removesuit - Gérer le cycle
-
-/start pour toutes les commandes"""
+/start pour les commandes"""
 
         await bot_client.send_message(ADMIN_ID, startup)
         return bot_client

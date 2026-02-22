@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-Bot Telegram de Prediction - CORRIGÉ v4
-Logique: Cibles _3,_5 (impairs) et _0,_8 (pairs)
-Déclencheurs: _2,_4,_9,_7
-Port: 10000
+Bot Telegram de Prediction - CORRIGÉ v6
+Messages simplifiés
 """
 import os
 import sys
 import asyncio
 import logging
 import re
-import json
 from datetime import datetime, timedelta
 from aiohttp import web
 from telethon import TelegramClient, events
@@ -42,15 +39,12 @@ EXCLUDED_NUMBERS = set(
     list(range(1386, 1391))
 )
 
-# Configuration des FINS DE NUMÉRO (derniers chiffres)
 TARGET_CONFIG = {
-    'impairs': [3, 5],      # Fins de numéro impairs à prédire
-    'pairs': [0, 8],        # Fins de numéro pairs à prédire
-    'triggers': {2: 3, 4: 5, 9: 0, 7: 8}  # Déclencheur: Cible
+    'targets': [2, 4, 6, 8],
+    'cycle': ['❤️', '♦️', '♣️', '♠️', '♦️', '❤️', '♠️', '♣️'],
 }
 
-SUIT_CYCLE = ['♦️', '♣️', '❤️', '♠️', '♦️', '❤️', '♠️', '♣️']
-SUIT_DISPLAY = {'♦️': '♦️ Carreau', '❤️': '❤️ Coeur', '♣️': '♣️ Trefle', '♠️': '♠️ Pique'}
+SUIT_DISPLAY = {'♦️': '♦️', '❤️': '❤️', '♣️': '♣️', '♠️': '♠️'}
 
 PAUSE_AFTER = 5
 PAUSE_MINUTES = [3, 4, 5]
@@ -63,14 +57,13 @@ PREDICTION_TIMEOUT = 10
 bot_client = None
 
 bot_state = {
-    'cycle': SUIT_CYCLE.copy(),
-    'cycle_pos': 0,
     'predictions_count': 0,
     'is_paused': False,
     'pause_end': None,
     'last_source_number': 0,
     'last_prediction_number': None,
     'predictions_history': [],
+    'precomputed_cycle': {},
 }
 
 verification_state = {
@@ -95,7 +88,6 @@ stats_bilan = {
 # ============================================================
 
 def extract_game_number(message):
-    """Extrait le numero de jeu du message"""
     match = re.search(r"#N\s*(\d+)", message, re.IGNORECASE)
     if match:
         return int(match.group(1))
@@ -114,18 +106,14 @@ def extract_game_number(message):
     return None
 
 def get_last_digit(number):
-    """Retourne le dernier chiffre d'un numéro"""
     return number % 10
 
 def extract_suits_from_first_group(message_text):
-    """Extrait les costumes du PREMIER groupe de parentheses"""
     matches = re.findall(r"\(([^)]+)\)", message_text)
     if not matches:
         return []
 
     first_group = matches[0]
-    
-    # Normalisation des variantes de cœurs
     normalized = first_group.replace('❤️', '♥️').replace('❤', '♥️')
     normalized = normalized.replace('♠️', '♠️').replace('♦️', '♦️').replace('♣️', '♣️')
 
@@ -137,114 +125,108 @@ def extract_suits_from_first_group(message_text):
     return suits
 
 def is_message_editing(message_text):
-    """Verifie si le message est en cours d'edition"""
     return message_text.strip().startswith('⏰')
 
 def is_message_finalized(message_text):
-    """Verifie si le message est finalise"""
     return '✅' in message_text or '🔰' in message_text
 
-def is_target_last_digit(last_digit, is_odd):
-    """Verifie si le dernier chiffre est une cible"""
-    if is_odd:
-        return last_digit in TARGET_CONFIG['impairs']
-    else:
-        return last_digit in TARGET_CONFIG['pairs']
+def is_target_number(number):
+    if number in EXCLUDED_NUMBERS or number < 1 or number > 1440:
+        return False
+    last_digit = get_last_digit(number)
+    return last_digit in TARGET_CONFIG['targets']
+
+def precompute_cycle():
+    global bot_state
+    
+    targets = TARGET_CONFIG['targets']
+    cycle = TARGET_CONFIG['cycle']
+    precomputed = {}
+    
+    start_num = 6
+    while get_last_digit(start_num) not in targets and start_num <= 1436:
+        start_num += 1
+    
+    if start_num > 1436:
+        logger.warning("⚠️ Aucun numéro cible trouvé entre 6 et 1436")
+        return
+    
+    logger.info(f"🔄 Pré-calcul du cycle à partir de #{start_num}")
+    
+    cycle_pos = 0
+    for num in range(start_num, 1437):
+        if get_last_digit(num) in targets:
+            precomputed[num] = cycle[cycle_pos % len(cycle)]
+            cycle_pos += 1
+    
+    bot_state['precomputed_cycle'] = precomputed
+    
+    examples = list(precomputed.items())[:10]
+    logger.info(f"📊 Cycle pré-calculé: {len(precomputed)} numéros")
+    logger.info(f"📝 Exemples: {examples}")
+
+def get_suit_for_number(number):
+    return bot_state['precomputed_cycle'].get(number)
 
 def get_trigger_target(trigger_num):
-    """
-    Calcule la cible à partir du déclencheur
-    Le numéro prédit doit être SUPÉRIEUR au numéro déclencheur
-    """
-    last_digit = get_last_digit(trigger_num)
-    target_last = TARGET_CONFIG['triggers'].get(last_digit)
-
-    if target_last is None:
-        return None
-
-    # Calculer le numéro cible
-    base = (trigger_num // 10) * 10
-    target = base + target_last
-
-    # CORRECTION: Si la cible est inférieure ou égale au déclencheur, 
-    # on passe à la dizaine suivante
-    if target <= trigger_num:
-        target = base + 10 + target_last
-        logger.info(f"🔄 Cible ajustée: {base + target_last} → {target} (doit être > {trigger_num})")
-
-    # Vérifier que la cible a une fin valide
-    if not is_target_last_digit(get_last_digit(target), target % 2 == 1):
-        return None
-        
-    # Vérifier que la cible n'est pas exclue
-    if target in EXCLUDED_NUMBERS:
-        logger.info(f"🚫 Cible #{target} exclue")
-        return None
-
-    return target
-
-def get_next_suit():
-    """Retourne le prochain costume du cycle"""
-    cycle = bot_state['cycle']
-    pos = bot_state['cycle_pos']
-    suit = cycle[pos % len(cycle)]
-    bot_state['cycle_pos'] = (pos + 1) % len(cycle)
-    return suit
+    for num in range(trigger_num + 1, 1437):
+        if is_target_number(num):
+            return num
+    return None
 
 def format_prediction(number, suit, status=None):
-    """Formate le message de prediction - CORRIGÉ pour éviter le double ✅"""
+    """Messages de prédiction simplifiés"""
+    suit_name = SUIT_DISPLAY.get(suit, suit)
+    
     if status == "pending" or status is None:
-        # Message initial
-        return f"""Бот №2
-🎰 **PRÉDICTION #{number}**
-🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
-📊 Statut: ⏳"""
+        return f"""🤖 Бот №2
+🎰 Прогноз #{number}
+🎯 Couleur : {suit_name} Cœur
+📊 Statут : ⏳ En attente"""
     
     elif status == "✅0️⃣":
-        return f"""Бот №2
-🎰 **PRÉDICTION #{number}**
-🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
-📊 Statut: ✅0️⃣ GAGNÉ"""
+        return f"""🤖 Бот №2
+🎰 Прогноз #{number}
+🎯 Couleur : {suit_name} Cœur
+📊 Statут : ✅ Gagné"""
     
     elif status == "✅1️⃣":
-        return f"""Бот №2
-🎰 **PRÉDICTION #{number}**
-🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
-📊 Statut: ✅1️⃣ GAGNÉ"""
+        return f"""🤖 Бот №2
+🎰 Прогноз #{number}
+🎯 Couleur : {suit_name} Cœur
+📊 Statут : ✅ Gagné (N+1)"""
     
     elif status == "✅2️⃣":
-        return f"""Бот №2
-🎰 **PRÉDICTION #{number}**
-🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
-📊 Statut: ✅2️⃣ GAGNÉ"""
+        return f"""🤖 Бот №2
+🎰 Прогноз #{number}
+🎯 Couleur : {suit_name} Cœur
+📊 Statут : ✅ Gagné (N+2)"""
     
     elif status == "✅3️⃣":
-        return f"""Бот №2
-🎰 **PRÉDICTION #{number}**
-🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
-📊 Statut: ✅3️⃣ GAGNÉ"""
+        return f"""🤖 Бот №2
+🎰 Прогноз #{number}
+🎯 Couleur : {suit_name} Cœur
+📊 Statут : ✅ Gagné (N+3)"""
     
     elif status == "❌":
-        return f"""Бот №2
-🎰 **PRÉDICTION #{number}**
-🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
-📊 Statut: ❌ PERDU"""
+        return f"""🤖 Бот №2
+🎰 Прогноз #{number}
+🎯 Couleur : {suit_name} Cœur
+📊 Statут : ❌ Perdu"""
     
     elif status == "⏹️":
-        return f"""Бот №2
-🎰 **PRÉDICTION #{number}**
-🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
-📊 Statut: ⏹️ EXPIRÉ"""
+        return f"""🤖 Бот №2
+🎰 Прогноз #{number}
+🎯 Couleur : {suit_name} Cœur
+📊 Statут : ⏹️ Expiré"""
     
     else:
-        # Fallback
-        return f"""Бот №2
-🎰 **PRÉDICTION #{number}**
-🎯 Couleur: {SUIT_DISPLAY.get(suit, suit)}
-📊 Statut: {status}"""
+        return f"""🤖 Бот №2
+🎰 Прогноз #{number}
+🎯 Couleur : {suit_name} Cœur
+📊 Statут : {status}"""
 
 def reset_verification_state():
-    """Réinitialise l'état de vérification"""
     global verification_state
     verification_state = {
         'predicted_number': None,
@@ -283,7 +265,6 @@ async def start_web_server():
 # ============================================================
 
 async def check_pause():
-    """Verifie si la pause est terminee"""
     if bot_state['is_paused'] and bot_state['pause_end']:
         if datetime.now() >= bot_state['pause_end']:
             bot_state['is_paused'] = False
@@ -295,7 +276,6 @@ async def check_pause():
     return not bot_state['is_paused']
 
 async def start_pause():
-    """Demarre une pause aleatoire"""
     import random
     minutes = random.choice(PAUSE_MINUTES)
     bot_state['is_paused'] = True
@@ -306,7 +286,6 @@ async def start_pause():
     logger.info(f"Pause {minutes} min")
 
 async def check_prediction_timeout(current_game):
-    """Vérifie si la prédiction en cours a expiré"""
     if verification_state['predicted_number'] is None:
         return False
     
@@ -343,7 +322,6 @@ async def check_prediction_timeout(current_game):
 # ============================================================
 
 async def send_prediction(target_game, predicted_suit, base_game):
-    """Envoie une prediction au canal"""
     if verification_state['predicted_number'] is not None:
         logger.error(f"⛔ BLOQUÉ: Prédiction #{verification_state['predicted_number']} en cours!")
         return False
@@ -372,9 +350,7 @@ async def send_prediction(target_game, predicted_suit, base_game):
             'timestamp': datetime.now().strftime('%H:%M:%S')
         })
 
-        trigger_last = get_last_digit(base_game)
-        target_last = get_last_digit(target_game)
-        logger.info(f"🚀 PRÉDICTION #{target_game} lancée (déclencheur #{base_game} _{trigger_last} → cible _{target_last})")
+        logger.info(f"🚀 PRÉDICTION #{target_game} ({predicted_suit}) lancée [déclencheur #{base_game}]")
         return True
 
     except Exception as e:
@@ -382,7 +358,6 @@ async def send_prediction(target_game, predicted_suit, base_game):
         return False
 
 async def update_prediction_status(status):
-    """Met a jour le statut de la prediction"""
     global stats_bilan
 
     if verification_state['predicted_number'] is None:
@@ -393,7 +368,6 @@ async def update_prediction_status(status):
         predicted_num = verification_state['predicted_number']
         predicted_suit = verification_state['predicted_suit']
 
-        # Utiliser format_prediction avec le status directement
         updated_text = format_prediction(predicted_num, predicted_suit, status)
 
         await bot_client.edit_message(
@@ -423,7 +397,6 @@ async def update_prediction_status(status):
         return False
 
 async def process_verification_step(game_number, message_text):
-    """Traite UNE étape de vérification - regarde UNIQUEMENT le premier groupe"""
     if verification_state['predicted_number'] is None:
         return
 
@@ -436,11 +409,9 @@ async def process_verification_step(game_number, message_text):
         logger.warning(f"⚠️ Reçu #{game_number} != attendu #{expected_number}")
         return
 
-    # EXTRAIRE UNIQUEMENT LES COSTUMES DU PREMIER GROUPE
     suits = extract_suits_from_first_group(message_text)
     logger.info(f"🔍 Vérification #{game_number}: premier groupe = {suits}, attendu = {predicted_suit}")
 
-    # Normaliser le costume prédit pour comparaison
     predicted_normalized = predicted_suit.replace('❤️', '♥️').replace('❤', '♥️')
 
     if predicted_normalized in suits:
@@ -458,7 +429,6 @@ async def process_verification_step(game_number, message_text):
         await update_prediction_status("❌")
 
 async def check_and_launch_prediction(game_number):
-    """Verifie et lance une prediction basée sur la FIN DE NUMÉRO"""
     
     await check_prediction_timeout(game_number)
     
@@ -470,26 +440,21 @@ async def check_and_launch_prediction(game_number):
         logger.info("⏸️ En pause")
         return
 
-    # Vérifier la FIN DE NUMÉRO (dernier chiffre)
-    last_digit = get_last_digit(game_number)
-    
-    # Vérifier si c'est un déclencheur
-    if last_digit not in TARGET_CONFIG['triggers']:
-        logger.info(f"ℹ️ #{game_number} (_{last_digit}) pas un déclencheur")
-        return
-
-    # Calculer la cible (le numéro prédit doit être SUPÉRIEUR)
     target_num = get_trigger_target(game_number)
+    
     if not target_num:
-        logger.warning(f"⚠️ Pas de cible valide pour #{game_number}")
+        logger.info(f"ℹ️ #{game_number} pas de cible disponible après")
         return
 
-    # Vérifier que la cible est bien supérieure
+    suit = get_suit_for_number(target_num)
+    if not suit:
+        logger.warning(f"⚠️ Cible #{target_num} n'a pas de costume dans le cycle")
+        return
+
     if target_num <= game_number:
         logger.error(f"❌ ERREUR: Cible #{target_num} <= déclencheur #{game_number}")
         return
 
-    suit = get_next_suit()
     success = await send_prediction(target_num, suit, game_number)
 
     if success and bot_state['predictions_count'] >= PAUSE_AFTER:
@@ -500,7 +465,6 @@ async def check_and_launch_prediction(game_number):
 # ============================================================
 
 async def process_source_message(event, is_edit=False):
-    """Traite les messages du canal source"""
     try:
         message_text = event.message.message
         game_number = extract_game_number(message_text)
@@ -518,7 +482,6 @@ async def process_source_message(event, is_edit=False):
 
         bot_state['last_source_number'] = game_number
 
-        # Vérification prédiction en cours
         if verification_state['predicted_number'] is not None:
             predicted_num = verification_state['predicted_number']
             current_check = verification_state['current_check']
@@ -547,7 +510,6 @@ async def process_source_message(event, is_edit=False):
             else:
                 logger.info(f"⏭️ Attente #{expected_number}, reçu #{game_number}")
 
-        # Lancer nouvelle prédiction
         await check_and_launch_prediction(game_number)
 
     except Exception as e:
@@ -569,143 +531,57 @@ async def handle_admin_commands(event):
 
     try:
         if cmd == '/start':
-            await event.respond("""🤖 Commandes disponibles:
+            await event.respond("""🤖 Commandes:
 
-**Configuration des fins de numéro:**
-/settargets <impairs> <pairs> - Fins à prédire (ex: /settargets 3,5 0,8)
-/settriggers <liste> - Fins déclencheurs (ex: /settriggers 2,4,9,7)
-/setmapping <map> - Mapping déclencheur→cible (ex: /setmapping 2:3,4:5,9:0,7:8)
-
-**Configuration du cycle:**
-/setcycle <emojis> - Cycle costumes (ex: /setcycle ♦️ ♣️ ❤️ ♠️)
-/addsuit <emoji> - Ajouter costume
-/removesuit <pos> - Retirer costume
-
-**Gestion:**
-/reset - Reset complet
-/forceunlock - Débloquer immédiatement
+/settargets <chiffres> - Fins à prédire (ex: /settargets 2,4,6,8)
+/setcycle <emojis> - Cycle costumes (ex: /setcycle ❤️ ♦️ ♣️ ♠️)
+/reset - Reset
+/forceunlock - Débloquer
 /pause /resume - Pause/Reprendre
-/info - Voir état complet
-/bilan - Statistiques
-/next - Prochain costume
-/timeout <n> - Changer timeout""")
+/info - État complet
+/showcycle - Afficher le cycle
+/bilan - Statistiques""")
 
         elif cmd == '/settargets':
-            if len(parts) < 3:
-                await event.respond(
-                    f"📋 Usage: `/settargets <impairs> <pairs>`\n"
-                    f"Ex: `/settargets 3,5 0,8`\n"
-                    f"Actuel: Impairs {TARGET_CONFIG['impairs']}, Pairs {TARGET_CONFIG['pairs']}"
-                )
-                return
-
-            try:
-                impairs = [int(x.strip()) for x in parts[1].split(',') if x.strip()]
-                pairs = [int(x.strip()) for x in parts[2].split(',') if x.strip()]
-                
-                for d in impairs:
-                    if d < 0 or d > 9 or d % 2 == 0:
-                        await event.respond(f"❌ {d} n'est pas impair (1,3,5,7,9)")
-                        return
-                
-                for d in pairs:
-                    if d < 0 or d > 9 or d % 2 == 1:
-                        await event.respond(f"❌ {d} n'est pas pair (0,2,4,6,8)")
-                        return
-
-                TARGET_CONFIG['impairs'] = impairs
-                TARGET_CONFIG['pairs'] = pairs
-                
-                await event.respond(
-                    f"✅ Fins de numéro à prédire modifiées!\n"
-                    f"🎯 Impairs: {impairs}\n"
-                    f"🎯 Pairs: {pairs}"
-                )
-
-            except Exception as e:
-                await event.respond(f"❌ Erreur: {e}")
-
-        elif cmd == '/settriggers':
             if len(parts) < 2:
-                current_triggers = list(TARGET_CONFIG['triggers'].keys())
                 await event.respond(
-                    f"📋 Usage: `/settriggers <liste>`\n"
-                    f"Ex: `/settriggers 2,4,9,7`\n"
-                    f"Actuel: {current_triggers}"
+                    f"📋 Usage: `/settargets <chiffres>`\n"
+                    f"Ex: `/settargets 2,4,6,8`\n"
+                    f"Actuel: {TARGET_CONFIG['targets']}"
                 )
                 return
 
             try:
-                new_triggers = [int(x.strip()) for x in parts[1].split(',') if x.strip()]
+                new_targets = [int(x.strip()) for x in parts[1].split(',') if x.strip()]
                 
-                for d in new_triggers:
+                for d in new_targets:
                     if d < 0 or d > 9:
                         await event.respond(f"❌ {d} invalide (0-9)")
                         return
 
-                old_mapping = TARGET_CONFIG['triggers'].copy()
-                new_mapping = {}
+                new_targets = sorted(list(set(new_targets)))
+                TARGET_CONFIG['targets'] = new_targets
+                precompute_cycle()
                 
-                for trigger in new_triggers:
-                    if trigger in old_mapping:
-                        new_mapping[trigger] = old_mapping[trigger]
-                    else:
-                        default_target = (trigger + 1) % 10
-                        new_mapping[trigger] = default_target
-                
-                TARGET_CONFIG['triggers'] = new_mapping
+                first_targets = [n for n in range(6, 50) if get_last_digit(n) in new_targets][:4]
+                example = " | ".join([f"#{n}{get_suit_for_number(n)}" for n in first_targets if get_suit_for_number(n)])
                 
                 await event.respond(
-                    f"✅ Déclencheurs: {list(new_mapping.keys())}\n"
-                    f"🎯 Mapping: {new_mapping}"
+                    f"✅ Fins de numéro: {new_targets}\n"
+                    f"🔄 Cycle recalculé: {len(bot_state['precomputed_cycle'])} numéros\n"
+                    f"📝 Début: {example}"
                 )
-
-            except Exception as e:
-                await event.respond(f"❌ Erreur: {e}")
-
-        elif cmd == '/setmapping':
-            if len(parts) < 2:
-                await event.respond(
-                    f"📋 Usage: `/setmapping <map>`\n"
-                    f"Format: déclencheur:cible,...\n"
-                    f"Ex: `/setmapping 2:3,4:5,9:0,7:8`\n"
-                    f"Actuel: {TARGET_CONFIG['triggers']}"
-                )
-                return
-
-            try:
-                new_mapping = {}
-                pairs = parts[1].split(',')
-                
-                for pair in pairs:
-                    if ':' not in pair:
-                        await event.respond(f"❌ Format invalide: {pair}")
-                        return
-                    
-                    t, c = pair.split(':')
-                    trigger = int(t.strip())
-                    cible = int(c.strip())
-                    
-                    if not (0 <= trigger <= 9 and 0 <= cible <= 9):
-                        await event.respond(f"❌ Chiffres 0-9 uniquement")
-                        return
-                    
-                    new_mapping[trigger] = cible
-                
-                TARGET_CONFIG['triggers'] = new_mapping
-                
-                mapping_text = "\n".join([f"  _{k} → _{v}" for k, v in sorted(new_mapping.items())])
-                await event.respond(f"✅ Mapping modifié:\n{mapping_text}")
 
             except Exception as e:
                 await event.respond(f"❌ Erreur: {e}")
 
         elif cmd == '/setcycle':
             if len(parts) < 2:
+                current = ' '.join(TARGET_CONFIG['cycle'])
                 await event.respond(
                     f"📋 Usage: `/setcycle <emojis...>`\n"
-                    f"Ex: `/setcycle ♦️ ♣️ ❤️ ♠️`\n"
-                    f"Actuel: {' '.join(bot_state['cycle'])}"
+                    f"Ex: `/setcycle ❤️ ♦️ ♣️ ♠️`\n"
+                    f"Actuel: {current}"
                 )
                 return
 
@@ -714,55 +590,49 @@ async def handle_admin_commands(event):
             invalid = [s for s in new_cycle if s not in valid]
 
             if invalid:
-                await event.respond(f"❌ Invalides: {invalid}")
+                await event.respond(f"❌ Invalides: {invalid}. Valides: {valid}")
                 return
 
-            bot_state['cycle'] = new_cycle
-            bot_state['cycle_pos'] = 0
-            await event.respond(f"✅ Cycle: {' '.join(new_cycle)}")
-
-        elif cmd == '/addsuit':
-            if len(parts) < 2:
-                await event.respond(f"📋 Usage: `/addsuit <emoji>`\nActuel: {' '.join(bot_state['cycle'])}")
-                return
-
-            suit = parts[1]
-            valid = ['♦️', '❤️', '♣️', '♠️']
+            TARGET_CONFIG['cycle'] = new_cycle
+            precompute_cycle()
             
-            if suit not in valid:
-                await event.respond(f"❌ Valides: {valid}")
-                return
+            targets = TARGET_CONFIG['targets']
+            first_nums = [n for n in range(6, 50) if get_last_digit(n) in targets][:6]
+            example = " ".join([f"#{n}{get_suit_for_number(n)}" for n in first_nums if get_suit_for_number(n)])
             
-            bot_state['cycle'].append(suit)
-            await event.respond(f"✅ Ajouté! Cycle: {' '.join(bot_state['cycle'])}")
+            await event.respond(
+                f"✅ Cycle: {' '.join(new_cycle)}\n"
+                f"🔄 Recalculé: {len(bot_state['precomputed_cycle'])} numéros\n"
+                f"📝 Exemple: {example}"
+            )
 
-        elif cmd == '/removesuit':
-            if len(parts) < 2:
-                cycle_str = " ".join([f"{i}:{s}" for i, s in enumerate(bot_state['cycle'])])
-                await event.respond(f"📋 Usage: `/removesuit <position>`\n{cycle_str}")
-                return
-
-            try:
-                pos = int(parts[1])
-                if pos < 0 or pos >= len(bot_state['cycle']):
-                    await event.respond(f"❌ Position 0-{len(bot_state['cycle'])-1}")
-                    return
-                
-                removed = bot_state['cycle'].pop(pos)
-                if bot_state['cycle_pos'] >= len(bot_state['cycle']):
-                    bot_state['cycle_pos'] = 0
-                
-                await event.respond(f"✅ {removed} retiré! Cycle: {' '.join(bot_state['cycle'])}")
-
-            except Exception as e:
-                await event.respond(f"❌ Erreur: {e}")
+        elif cmd == '/showcycle':
+            targets = TARGET_CONFIG['targets']
+            lines = []
+            
+            count = 0
+            for num in range(6, 1437):
+                if count >= 20:
+                    break
+                if get_last_digit(num) in targets:
+                    suit = get_suit_for_number(num)
+                    if suit:
+                        lines.append(f"#{num}{suit}")
+                        count += 1
+            
+            cycle_str = " → ".join(lines)
+            await event.respond(
+                f"🎨 **Cycle** (fins: {targets})\n"
+                f"{' '.join(TARGET_CONFIG['cycle'])}\n\n"
+                f"Début:\n{cycle_str}\n\n"
+                f"Total: {len(bot_state['precomputed_cycle'])} numéros"
+            )
 
         elif cmd == '/reset':
             old_pred = verification_state['predicted_number']
             bot_state['predictions_count'] = 0
             bot_state['is_paused'] = False
             bot_state['pause_end'] = None
-            bot_state['cycle_pos'] = 0
             reset_verification_state()
             await event.respond(f"🔄 RESET!{f' (prédiction #{old_pred} effacée)' if old_pred else ''} Système libéré!")
 
@@ -770,22 +640,6 @@ async def handle_admin_commands(event):
             old_pred = verification_state['predicted_number']
             reset_verification_state()
             await event.respond(f"🔓 FORCÉ! #{old_pred} annulée. Système libre!")
-
-        elif cmd == '/timeout':
-            global PREDICTION_TIMEOUT
-            if len(parts) < 2:
-                await event.respond(f"📋 Usage: `/timeout <n>`\nActuel: {PREDICTION_TIMEOUT}")
-                return
-            
-            try:
-                new_timeout = int(parts[1])
-                if new_timeout < 3 or new_timeout > 50:
-                    await event.respond("❌ Entre 3 et 50")
-                    return
-                PREDICTION_TIMEOUT = new_timeout
-                await event.respond(f"✅ Timeout: {PREDICTION_TIMEOUT} jeux")
-            except ValueError:
-                await event.respond("❌ Nombre invalide")
 
         elif cmd == '/info':
             last_src = bot_state['last_source_number']
@@ -797,24 +651,30 @@ async def handle_admin_commands(event):
             if current_pred:
                 next_check = current_pred + verification_state['current_check']
                 remaining = PREDICTION_TIMEOUT - (last_src - current_pred)
-                verif_info = f"#{current_pred} (check {verification_state['current_check']}/3, attend #{next_check}, timeout {remaining})"
+                verif_info = f"#{current_pred} (check {verification_state['current_check']}/3, #{next_check}, timeout {remaining})"
 
-            mapping_text = "\n".join([f"    _{k} → _{v}" for k, v in sorted(TARGET_CONFIG['triggers'].items())])
+            targets = TARGET_CONFIG['targets']
+            examples = []
+            for num in range(6, 50):
+                if len(examples) >= 4:
+                    break
+                if get_last_digit(num) in targets:
+                    suit = get_suit_for_number(num)
+                    if suit:
+                        examples.append(f"#{num}{suit}")
 
             msg = f"""📊 **STATUT**
 
 🟢 **État:** {status}
-🎯 **Dernier source:** #{last_src} (_{get_last_digit(last_src)})
-🔍 **Dernière prédiction:** #{last_pred if last_pred else 'Aucune'}
+🎯 **Source:** #{last_src}
+🔍 **Prédiction:** #{last_pred if last_pred else 'Aucune'}
 🔎 **Vérification:** {verif_info}
 📊 **Pause:** {bot_state['predictions_count']}/{PAUSE_AFTER}
 
-🎯 **CIBLES:** Impairs {TARGET_CONFIG['impairs']} | Pairs {TARGET_CONFIG['pairs']}
-🔗 **MAPPING:**
-{mapping_text}
-
-🎨 **Cycle:** {' '.join(bot_state['cycle'])}
-📍 **Position:** {bot_state['cycle_pos']}/{len(bot_state['cycle'])}
+🎯 **CIBLES:** {TARGET_CONFIG['targets']}
+🎨 **Cycle:** {' '.join(TARGET_CONFIG['cycle'])}
+📊 **Pré-calcul:** {len(bot_state['precomputed_cycle'])} numéros
+📝 **Exemples:** {' | '.join(examples)}
 
 💡 `/reset` ou `/forceunlock` si bloqué"""
 
@@ -823,15 +683,6 @@ async def handle_admin_commands(event):
                 msg += f"\n\n⏸️ **Pause:** {remaining.seconds // 60} min"
 
             await event.respond(msg)
-
-        elif cmd == '/next':
-            cycle = bot_state['cycle']
-            pos = bot_state['cycle_pos']
-            if cycle:
-                next_suit = cycle[pos % len(cycle)]
-                await event.respond(f"🎯 Prochain: {SUIT_DISPLAY.get(next_suit, next_suit)}")
-            else:
-                await event.respond("❌ Cycle vide")
 
         elif cmd == '/bilan':
             if stats_bilan['total'] == 0:
@@ -895,17 +746,25 @@ async def start_bot():
             if event.sender_id == ADMIN_ID:
                 await handle_admin_commands(event)
 
-        mapping_text = "\n".join([f"  _{k} → _{v}" for k, v in sorted(TARGET_CONFIG['triggers'].items())])
+        precompute_cycle()
 
-        startup = f"""🤖 **BOT PRÉDICTION DÉMARRÉ** (v4 - Corrigé)
+        targets = TARGET_CONFIG['targets']
+        examples = []
+        for num in range(6, 30):
+            if len(examples) >= 6:
+                break
+            if get_last_digit(num) in targets:
+                suit = get_suit_for_number(num)
+                if suit:
+                    examples.append(f"#{num}{suit}")
 
-🎯 **Cibles:** Impairs {TARGET_CONFIG['impairs']} | Pairs {TARGET_CONFIG['pairs']}
-🔗 **Mapping:**
-{mapping_text}
+        startup = f"""🤖 **BOT PRÉDICTION DÉMARRÉ** (v6)
 
-⚠️ **Le numéro prédit est TOUJOURS supérieur au déclencheur**
-🎨 **Cycle:** {' '.join(bot_state['cycle'])}
-⏱️ **Timeout:** {PREDICTION_TIMEOUT} jeux
+🎯 **Cibles:** {TARGET_CONFIG['targets']}
+🎨 **Cycle:** {' '.join(TARGET_CONFIG['cycle'])}
+📊 **Pré-calcul:** {len(bot_state['precomputed_cycle'])} numéros
+
+📝 **Exemples:** {' → '.join(examples)}
 
 /start pour les commandes"""
 

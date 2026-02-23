@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Bot Telegram de Prediction - CORRIGÉ v7
-Avec gestion des pauses personnalisées et système de blagues
+Bot Telegram de Prediction - CORRIGÉ v8.1
+Gestion stricte des prédictions séquentielles et pauses différées
+Messages de pause simplifiés
 """
 import os
 import sys
@@ -48,9 +49,8 @@ TARGET_CONFIG = {
 SUIT_DISPLAY = {'♦️': '♦️', '❤️': '❤️', '♣️': '♣️', '♠️': '♠️'}
 
 PAUSE_AFTER = 5
-# Cycle de pause par défaut modifiable
-PAUSE_CYCLE_MINUTES = [3, 5, 4]  # Cycle par défaut: 3min, 5min, 4min
-PAUSE_CYCLE_INDEX = 0  # Index actuel dans le cycle
+PAUSE_CYCLE_MINUTES = [3, 5, 4]
+PAUSE_CYCLE_INDEX = 0
 
 PREDICTION_TIMEOUT = 10
 
@@ -68,9 +68,11 @@ bot_state = {
     'last_prediction_number': None,
     'predictions_history': [],
     'precomputed_cycle': {},
-    'is_stopped': False,  # Arrêt temporaire complet
-    'stop_end': None,     # Fin de l'arrêt temporaire
-    'joke_task': None,    # Tâche d'envoi de blagues
+    'is_stopped': False,
+    'stop_end': None,
+    'joke_task': None,
+    'pause_pending': False,
+    'last_processed_trigger': 0,
 }
 
 verification_state = {
@@ -91,7 +93,7 @@ stats_bilan = {
 }
 
 # ============================================================
-# SYSTÈME DE BLAGUES (10 blagues par défaut)
+# SYSTÈME DE BLAGUES
 # ============================================================
 
 DEFAULT_JOKES = [
@@ -107,7 +109,6 @@ DEFAULT_JOKES = [
     "🃏 Qu'est-ce qu'un as qui ment ? Un as... du bluff ! 😎"
 ]
 
-# Chargement des blagues (avec persistance possible)
 JOKES_LIST = DEFAULT_JOKES.copy()
 
 # ============================================================
@@ -202,7 +203,6 @@ def get_trigger_target(trigger_num):
     return None
 
 def format_prediction(number, suit, status=None):
-    """Messages de prédiction selon les formats spécifiés"""
     suit_name = SUIT_DISPLAY.get(suit, suit)
     
     if status == "pending" or status is None:
@@ -272,6 +272,8 @@ def reset_verification_state():
 
 async def handle_health(request):
     status = "STOPPED" if bot_state['is_stopped'] else ("PAUSED" if bot_state['is_paused'] else "RUNNING")
+    if bot_state['pause_pending']:
+        status += " (PAUSE PENDING)"
     last = bot_state['last_source_number']
     pred = verification_state['predicted_number'] or 'Libre'
     return web.Response(text=f"Bot {status} | Source: #{last} | Pred: #{pred}", status=200)
@@ -288,7 +290,7 @@ async def start_web_server():
     return runner
 
 # ============================================================
-# SYSTÈME DE PAUSE ET ARRÊT TEMPORAIRE
+# SYSTÈME DE PAUSE AMÉLIORÉ
 # ============================================================
 
 async def check_pause():
@@ -302,18 +304,35 @@ async def check_pause():
             return True
     return not bot_state['is_paused']
 
-async def start_pause():
+async def execute_pause():
+    """Exécute la pause après vérification qu'aucune prédiction n'est en cours"""
     global PAUSE_CYCLE_INDEX
-    # Utilise le cycle de pause configuré
+    
     minutes = PAUSE_CYCLE_MINUTES[PAUSE_CYCLE_INDEX % len(PAUSE_CYCLE_MINUTES)]
     PAUSE_CYCLE_INDEX += 1
     
     bot_state['is_paused'] = True
     bot_state['pause_end'] = datetime.now() + timedelta(minutes=minutes)
-    msg = f"⏸️ Pause de {minutes} min (cycle: {PAUSE_CYCLE_MINUTES}, index: {PAUSE_CYCLE_INDEX})"
-    await bot_client.send_message(PREDICTION_CHANNEL_ID, msg)
-    await bot_client.send_message(ADMIN_ID, f"⏸️ {msg}")
-    logger.info(f"Pause {minutes} min")
+    bot_state['pause_pending'] = False
+    
+    # Message simplifié pour le canal de prédiction
+    msg_public = f"⏸️ Pause de {minutes} min"
+    # Message détaillé pour l'admin
+    msg_admin = f"⏸️ Pause de {minutes} min (cycle: {PAUSE_CYCLE_MINUTES})"
+    
+    await bot_client.send_message(PREDICTION_CHANNEL_ID, msg_public)
+    await bot_client.send_message(ADMIN_ID, msg_admin)
+    logger.info(f"Pause {minutes} min démarrée")
+
+async def schedule_pause_if_needed():
+    """Planifie une pause si le compte est atteint, mais attend la libération"""
+    if bot_state['predictions_count'] >= PAUSE_AFTER:
+        if verification_state['predicted_number'] is not None:
+            if not bot_state['pause_pending']:
+                bot_state['pause_pending'] = True
+                logger.info(f"⏸️ PAUSE PLANIFIÉE après vérification de #{verification_state['predicted_number']}")
+                await bot_client.send_message(ADMIN_ID, 
+                    f"⏸️ Pause planifiée après vérification de #{verification_state['predicted_number']}")
 
 async def check_prediction_timeout(current_game):
     if verification_state['predicted_number'] is None:
@@ -343,16 +362,19 @@ async def check_prediction_timeout(current_game):
             logger.error(f"Erreur mise à jour expiration: {e}")
         
         reset_verification_state()
+        
+        if bot_state['pause_pending']:
+            await execute_pause()
+        
         return True
     
     return False
 
 # ============================================================
-# SYSTÈME DE BLAGUES DURANT L'ARRÊT TEMPORAIRE
+# SYSTÈME DE BLAGUES
 # ============================================================
 
 async def send_jokes_during_stop():
-    """Envoie des blagues toutes les 5 minutes pendant l'arrêt temporaire"""
     global JOKES_LIST
     
     if not JOKES_LIST:
@@ -363,16 +385,14 @@ async def send_jokes_during_stop():
     used_jokes = []
     
     while bot_state['is_stopped']:
-        # Vérifie si l'arrêt est terminé
         if bot_state['stop_end'] and datetime.now() >= bot_state['stop_end']:
             logger.info("⏰ Fin de l'arrêt temporaire programmée")
             await stop_temporary_stop()
             break
         
-        # Sélectionne une blague non utilisée récemment
         available_jokes = [j for j in JOKES_LIST if j not in used_jokes]
         if not available_jokes:
-            used_jokes = []  # Reset si toutes utilisées
+            used_jokes = []
             available_jokes = JOKES_LIST
         
         joke = random.choice(available_jokes)
@@ -387,14 +407,12 @@ async def send_jokes_during_stop():
         except Exception as e:
             logger.error(f"❌ Erreur envoi blague: {e}")
         
-        # Attend 5 minutes
-        for _ in range(30):  # Vérifie toutes les 10 secondes si l'arrêt est annulé
+        for _ in range(30):
             if not bot_state['is_stopped']:
                 break
             await asyncio.sleep(10)
 
 async def start_temporary_stop(minutes):
-    """Démarre l'arrêt temporaire avec envoi de blagues"""
     global PAUSE_CYCLE_MINUTES
     
     if bot_state['is_stopped']:
@@ -404,36 +422,29 @@ async def start_temporary_stop(minutes):
     bot_state['is_stopped'] = True
     bot_state['stop_end'] = datetime.now() + timedelta(minutes=minutes)
     
-    # Annule toute prédiction en cours
     if verification_state['predicted_number'] is not None:
         reset_verification_state()
     
-    # Message d'annonce
     msg = f"""🛑 **ARRÊT TEMPORAIRE ACTIVÉ**
 
 ⏱️ Durée: {minutes} minutes
 😄 Blagues: Toutes les 5 minutes ({len(JOKES_LIST)} disponibles)
-🎰 Prédictions: ARRÊTÉES
-
-Cycle de pause actuel: {PAUSE_CYCLE_MINUTES}"""
+🎰 Prédictions: ARRÊTÉES"""
     
     await bot_client.send_message(PREDICTION_CHANNEL_ID, msg)
     await bot_client.send_message(ADMIN_ID, f"🛑 Arrêt temporaire démarré ({minutes} min)")
     
-    # Démarre la tâche de blagues
     bot_state['joke_task'] = asyncio.create_task(send_jokes_during_stop())
     logger.info(f"🛑 Arrêt temporaire démarré: {minutes} min")
     return True
 
 async def stop_temporary_stop():
-    """Arrête l'arrêt temporaire et relance les prédictions"""
     if not bot_state['is_stopped']:
         return False
     
     bot_state['is_stopped'] = False
     bot_state['stop_end'] = None
     
-    # Annule la tâche de blagues si en cours
     if bot_state['joke_task']:
         bot_state['joke_task'].cancel()
         try:
@@ -453,17 +464,18 @@ async def stop_temporary_stop():
     return True
 
 # ============================================================
-# SYSTÈME DE PRÉDICTION ET VÉRIFICATION
+# SYSTÈME DE PRÉDICTION STRICTEMENT SÉQUENTIEL
 # ============================================================
 
 async def send_prediction(target_game, predicted_suit, base_game):
-    # Vérifie si arrêt temporaire
     if bot_state['is_stopped']:
         logger.info("🛑 Prédiction bloquée: arrêt temporaire en cours")
         return False
     
     if verification_state['predicted_number'] is not None:
-        logger.error(f"⛔ BLOQUÉ: Prédiction #{verification_state['predicted_number']} en cours!")
+        logger.error(f"⛔ BLOQUÉ: Prédiction #{verification_state['predicted_number']} en cours de vérification!")
+        await bot_client.send_message(ADMIN_ID, 
+            f"⚠️ Tentative de double prédiction bloquée! #{target_game} ignoré car #{verification_state['predicted_number']} en cours.")
         return False
 
     try:
@@ -483,6 +495,7 @@ async def send_prediction(target_game, predicted_suit, base_game):
 
         bot_state['last_prediction_number'] = target_game
         bot_state['predictions_count'] += 1
+        bot_state['last_processed_trigger'] = base_game
         bot_state['predictions_history'].append({
             'number': target_game,
             'suit': predicted_suit,
@@ -491,6 +504,11 @@ async def send_prediction(target_game, predicted_suit, base_game):
         })
 
         logger.info(f"🚀 PRÉDICTION #{target_game} ({predicted_suit}) lancée [déclencheur #{base_game}]")
+        logger.info(f"📊 Compteur: {bot_state['predictions_count']}/{PAUSE_AFTER}")
+        
+        if bot_state['predictions_count'] >= PAUSE_AFTER:
+            await schedule_pause_if_needed()
+        
         return True
 
     except Exception as e:
@@ -528,8 +546,13 @@ async def update_prediction_status(status):
         elif status == '⏹️':
             logger.info(f"⏹️ #{predicted_num} EXPIRÉ")
 
-        logger.info(f"🔓 SYSTÈME LIBÉRÉ")
+        logger.info(f"🔓 SYSTÈME LIBÉRÉ - Prêt pour nouvelle prédiction")
         reset_verification_state()
+        
+        if bot_state['pause_pending']:
+            logger.info("⏸️ Exécution de la pause planifiée...")
+            await execute_pause()
+        
         return True
 
     except Exception as e:
@@ -568,17 +591,33 @@ async def process_verification_step(game_number, message_text):
         logger.info(f"💔 PERDU après 4 vérifications (jusqu'à #{game_number})")
         await update_prediction_status("❌")
 
-async def check_and_launch_prediction(game_number):
+async def launch_post_verification_prediction():
+    if verification_state['predicted_number'] is not None:
+        logger.warning("⛔ Système encore occupé, impossible de lancer une nouvelle prédiction")
+        return
     
-    # Vérifie arrêt temporaire
+    last_game = bot_state['last_source_number']
+    
+    if last_game <= bot_state['last_processed_trigger']:
+        logger.info(f"⏭️ Dernier déclencheur #{last_game} déjà traité (dernier: #{bot_state['last_processed_trigger']})")
+        return
+    
+    logger.info(f"🔄 Libération détectée - Analyse du dernier numéro #{last_game}")
+    await check_and_launch_prediction(last_game, force_check=True)
+
+async def check_and_launch_prediction(game_number, force_check=False):
     if bot_state['is_stopped']:
         logger.info("🛑 Prédiction bloquée: arrêt temporaire")
+        return
+    
+    if not force_check and game_number <= bot_state['last_processed_trigger']:
+        logger.debug(f"⏭️ Numéro #{game_number} déjà traité")
         return
     
     await check_prediction_timeout(game_number)
     
     if verification_state['predicted_number'] is not None:
-        logger.warning(f"⛔ BLOQUÉ: Prédiction #{verification_state['predicted_number']} en attente.")
+        logger.warning(f"⛔ BLOQUÉ: Prédiction #{verification_state['predicted_number']} en attente de vérification.")
         return
 
     if not await check_pause():
@@ -589,21 +628,24 @@ async def check_and_launch_prediction(game_number):
     
     if not target_num:
         logger.info(f"ℹ️ #{game_number} pas de cible disponible après")
+        bot_state['last_processed_trigger'] = game_number
         return
 
     suit = get_suit_for_number(target_num)
     if not suit:
         logger.warning(f"⚠️ Cible #{target_num} n'a pas de costume dans le cycle")
+        bot_state['last_processed_trigger'] = game_number
         return
 
     if target_num <= game_number:
         logger.error(f"❌ ERREUR: Cible #{target_num} <= déclencheur #{game_number}")
+        bot_state['last_processed_trigger'] = game_number
         return
 
     success = await send_prediction(target_num, suit, game_number)
-
-    if success and bot_state['predictions_count'] >= PAUSE_AFTER:
-        await start_pause()
+    
+    if not success:
+        logger.warning(f"❌ Échec envoi prédiction pour #{target_num}")
 
 # ============================================================
 # TRAITEMENT DES MESSAGES SOURCE
@@ -635,6 +677,8 @@ async def process_source_message(event, is_edit=False):
             if game_number > predicted_num + PREDICTION_TIMEOUT:
                 logger.warning(f"⏰ Prédiction #{predicted_num} obsolète")
                 await check_prediction_timeout(game_number)
+                if verification_state['predicted_number'] is None:
+                    await check_and_launch_prediction(game_number)
             
             elif game_number == expected_number:
                 if is_editing and not is_finalized:
@@ -646,14 +690,17 @@ async def process_source_message(event, is_edit=False):
                     await process_verification_step(game_number, message_text)
                     
                     if verification_state['predicted_number'] is None:
-                        logger.info("✅ Vérification terminée, traitement du déclencheur...")
-                        await check_and_launch_prediction(game_number)
+                        logger.info("🔓 Système libéré après vérification")
+                        await asyncio.sleep(1)
+                        await launch_post_verification_prediction()
                     return
                 else:
                     logger.info(f"⏳ Attente finalisation #{game_number}")
                     return
             else:
                 logger.info(f"⏭️ Attente #{expected_number}, reçu #{game_number}")
+            
+            return
 
         await check_and_launch_prediction(game_number)
 
@@ -685,10 +732,12 @@ async def handle_admin_commands(event):
 /setpausecycle <minutes> - Cycle pause (ex: /setpausecycle 3,5,4)
 /stop <minutes> - Arrêt temporaire avec blagues
 /stopnow - Arrêter immédiatement l'arrêt temporaire
-/jokes - Gérer les blagues (voir sous-commandes)
+/forcepause - Forcer la pause immédiatement (si aucune prédiction)
+/jokes - Gérer les blagues
 /reset - Reset
 /forceunlock - Débloquer
 /pause /resume - Pause/Reprendre
+/status - État détaillé du système
 /info - État complet
 /showcycle - Afficher le cycle
 /bilan - Statistiques""")
@@ -758,13 +807,11 @@ async def handle_admin_commands(event):
             )
 
         elif cmd == '/setpausecycle':
-            """Modifie le cycle des pauses"""
             if len(parts) < 2:
                 await event.respond(
                     f"📋 Usage: `/setpausecycle <minutes>`\n"
                     f"Ex: `/setpausecycle 3,5,4` ou `/setpausecycle 5,10`\n"
-                    f"Actuel: {PAUSE_CYCLE_MINUTES}\n"
-                    f"Prochain index: {PAUSE_CYCLE_INDEX % len(PAUSE_CYCLE_MINUTES)}"
+                    f"Actuel: {PAUSE_CYCLE_MINUTES}"
                 )
                 return
 
@@ -781,13 +828,12 @@ async def handle_admin_commands(event):
                         return
 
                 PAUSE_CYCLE_MINUTES = new_cycle
-                PAUSE_CYCLE_INDEX = 0  # Reset l'index
+                PAUSE_CYCLE_INDEX = 0
                 
                 await event.respond(
                     f"✅ **Cycle de pause modifié!**\n\n"
                     f"🔄 Nouveau cycle: {PAUSE_CYCLE_MINUTES}\n"
-                    f"📊 {len(PAUSE_CYCLE_MINUTES)} valeur(s)\n"
-                    f"🎯 Prochaine pause: {PAUSE_CYCLE_MINUTES[0]} min"
+                    f"📊 {len(PAUSE_CYCLE_MINUTES)} valeur(s)"
                 )
                 logger.info(f"Cycle de pause modifié: {PAUSE_CYCLE_MINUTES}")
 
@@ -795,7 +841,6 @@ async def handle_admin_commands(event):
                 await event.respond(f"❌ Erreur: {e}")
 
         elif cmd == '/stop':
-            """Arrêt temporaire avec blagues"""
             if len(parts) < 2:
                 await event.respond(
                     f"📋 Usage: `/stop <minutes>`\n"
@@ -818,7 +863,6 @@ async def handle_admin_commands(event):
                 await event.respond(f"❌ Erreur: {e}")
 
         elif cmd == '/stopnow':
-            """Arrête immédiatement l'arrêt temporaire"""
             if not bot_state['is_stopped']:
                 await event.respond("❌ Aucun arrêt temporaire en cours")
                 return
@@ -826,10 +870,25 @@ async def handle_admin_commands(event):
             await stop_temporary_stop()
             await event.respond("✅ Arrêt temporaire terminé manuellement")
 
+        elif cmd == '/forcepause':
+            if verification_state['predicted_number'] is not None:
+                await event.respond(
+                    f"❌ Impossible de forcer la pause!\n"
+                    f"Prédiction #{verification_state['predicted_number']} en cours de vérification.\n"
+                    f"La pause démarrera automatiquement après vérification."
+                )
+                return
+            
+            if bot_state['is_paused']:
+                await event.respond("⏸️ Le bot est déjà en pause!")
+                return
+            
+            bot_state['predictions_count'] = PAUSE_AFTER
+            await execute_pause()
+            await event.respond("✅ Pause forcée démarrée!")
+
         elif cmd == '/jokes':
-            """Gestion des blagues"""
             if len(parts) < 2:
-                # Affiche la liste des sous-commandes
                 jokes_preview = "\n".join([f"{i+1}. {j[:50]}..." for i, j in enumerate(JOKES_LIST[:5])])
                 if len(JOKES_LIST) > 5:
                     jokes_preview += f"\n... et {len(JOKES_LIST) - 5} autres"
@@ -841,7 +900,7 @@ async def handle_admin_commands(event):
                     f"`/jokes list` - Voir toutes les blagues\n"
                     f"`/jokes add <texte>` - Ajouter une blague\n"
                     f"`/jokes del <numéro>` - Supprimer une blague\n"
-                    f"`/jokes edit <numéro> <texte>` - Modifier une blague\n"
+                    f"`/jokes edit <num> <texte>` - Modifier une blague\n"
                     f"`/jokes reset` - Réinitialiser les blagues par défaut\n\n"
                     f"**Aperçu:**\n{jokes_preview}"
                 )
@@ -850,7 +909,6 @@ async def handle_admin_commands(event):
             subcmd = parts[1].lower()
 
             if subcmd == 'list':
-                # Liste toutes les blagues
                 if not JOKES_LIST:
                     await event.respond("📭 Aucune blague enregistrée")
                     return
@@ -858,7 +916,6 @@ async def handle_admin_commands(event):
                 jokes_text = ""
                 for i, joke in enumerate(JOKES_LIST, 1):
                     jokes_text += f"**{i}.** {joke}\n\n"
-                    # Évite les messages trop longs
                     if i % 5 == 0 and i < len(JOKES_LIST):
                         await event.respond(jokes_text)
                         jokes_text = ""
@@ -922,6 +979,36 @@ async def handle_admin_commands(event):
             else:
                 await event.respond("❓ Sous-commande inconnue. Utilisez `/jokes` pour voir la liste")
 
+        elif cmd == '/status':
+            current_pred = verification_state['predicted_number']
+            
+            status_msg = f"""📊 **ÉTAT DU SYSTÈME**
+
+🔒 **Verrouillage:** {'🔴 OCCUPÉ' if current_pred else '🟢 LIBRE'}
+"""
+            if current_pred:
+                status_msg += f"""   └ Prédiction #{current_pred} en cours
+   └ Check: {verification_state['current_check']}/3
+   └ Déclencheur: #{verification_state['base_game']}
+   └ Suit: {verification_state['predicted_suit']}
+   └ Attend: #{current_pred + verification_state['current_check']}
+"""
+            
+            status_msg += f"""
+⏸️ **Pause:** {'🟡 EN ATTENTE' if bot_state['pause_pending'] else ('🔴 ACTIVE' if bot_state['is_paused'] else '🟢 INACTIVE')}
+"""
+            if bot_state['is_paused'] and bot_state['pause_end']:
+                remaining = bot_state['pause_end'] - datetime.now()
+                status_msg += f"   └ Restant: {remaining.seconds // 60} min\n"
+            
+            status_msg += f"""
+📊 **Compteur:** {bot_state['predictions_count']}/{PAUSE_AFTER}
+🎯 **Dernier traité:** #{bot_state['last_processed_trigger']}
+📩 **Dernier source:** #{bot_state['last_source_number']}
+🛑 **Arrêt temp.:** {'🔴 OUI' if bot_state['is_stopped'] else '🟢 NON'}
+"""
+            await event.respond(status_msg)
+
         elif cmd == '/showcycle':
             targets = TARGET_CONFIG['targets']
             lines = []
@@ -946,29 +1033,51 @@ async def handle_admin_commands(event):
 
         elif cmd == '/reset':
             old_pred = verification_state['predicted_number']
+            old_pending = bot_state['pause_pending']
+            
             bot_state['predictions_count'] = 0
             bot_state['is_paused'] = False
             bot_state['pause_end'] = None
+            bot_state['pause_pending'] = False
+            bot_state['last_processed_trigger'] = 0
+            
             reset_verification_state()
-            await event.respond(f"🔄 RESET!{f' (prédiction #{old_pred} effacée)' if old_pred else ''} Système libéré!")
+            
+            msg = f"🔄 RESET!"
+            if old_pred:
+                msg += f" (prédiction #{old_pred} effacée)"
+            if old_pending:
+                msg += " (pause annulée)"
+            msg += " Système libéré!"
+            
+            await event.respond(msg)
 
         elif cmd == '/forceunlock':
             old_pred = verification_state['predicted_number']
+            was_pending = bot_state['pause_pending']
+            
             reset_verification_state()
-            await event.respond(f"🔓 FORCÉ! #{old_pred} annulée. Système libre!")
+            
+            if was_pending:
+                await execute_pause()
+                await event.respond(f"🔓 FORCÉ! #{old_pred} annulée. Pause démarrée!")
+            else:
+                await event.respond(f"🔓 FORCÉ! #{old_pred} annulée. Système libre!")
 
         elif cmd == '/info':
             last_src = bot_state['last_source_number']
             last_pred = bot_state['last_prediction_number']
             current_pred = verification_state['predicted_number']
 
-            # Détermine le statut global
             if bot_state['is_stopped']:
                 status = "🛑 ARRÊT TEMPORAIRE"
                 stop_remaining = bot_state['stop_end'] - datetime.now()
                 stop_info = f"\n⏱️ Restant: {stop_remaining.seconds // 60} min"
             elif bot_state['is_paused']:
                 status = "⏸️ PAUSE"
+                stop_info = ""
+            elif bot_state['pause_pending']:
+                status = "⏸️ PAUSE EN ATTENTE"
                 stop_info = ""
             else:
                 status = "▶️ ACTIF"
@@ -996,11 +1105,11 @@ async def handle_admin_commands(event):
 🎯 **Source:** #{last_src}
 🔍 **Prédiction:** #{last_pred if last_pred else 'Aucune'}
 🔎 **Vérification:** {verif_info}
-📊 **Pause:** {bot_state['predictions_count']}/{PAUSE_AFTER}
+📊 **Pause:** {bot_state['predictions_count']}/{PAUSE_AFTER} {'(EN ATTENTE)' if bot_state['pause_pending'] else ''}
 
 🎯 **CIBLES:** {TARGET_CONFIG['targets']}
 🎨 **Cycle:** {' '.join(TARGET_CONFIG['cycle'])}
-⏸️ **Cycle pause:** {PAUSE_CYCLE_MINUTES} (index: {PAUSE_CYCLE_INDEX % len(PAUSE_CYCLE_MINUTES)})
+⏸️ **Cycle pause:** {len(PAUSE_CYCLE_MINUTES)} valeurs configurées
 😄 **Blagues:** {len(JOKES_LIST)} disponibles
 📊 **Pré-calcul:** {len(bot_state['precomputed_cycle'])} numéros
 📝 **Exemples:** {' | '.join(examples)}
@@ -1039,6 +1148,7 @@ async def handle_admin_commands(event):
         elif cmd == '/resume':
             bot_state['is_paused'] = False
             bot_state['pause_end'] = None
+            bot_state['pause_pending'] = False
             await event.respond("▶️ Repris!")
 
         else:
@@ -1087,13 +1197,18 @@ async def start_bot():
                 if suit:
                     examples.append(f"#{num}{suit}")
 
-        startup = f"""🤖 **BOT PRÉDICTION DÉMARRÉ** (v7)
+        startup = f"""🤖 **BOT PRÉDICTION DÉMARRÉ** (v8.1 - SÉQUENTIEL STRICT)
 
 🎯 **Cibles:** {TARGET_CONFIG['targets']}
 🎨 **Cycle:** {' '.join(TARGET_CONFIG['cycle'])}
-⏸️ **Cycle pause:** {PAUSE_CYCLE_MINUTES}
+⏸️ **Cycle pause:** {len(PAUSE_CYCLE_MINUTES)} valeurs
 😄 **Blagues:** {len(JOKES_LIST)} disponibles
 📊 **Pré-calcul:** {len(bot_state['precomputed_cycle'])} numéros
+
+⚠️ **Mode strict activé:**
+• Une seule prédiction à la fois
+• Pause différée si vérification en cours
+• Prédiction sur dernier numéro après libération
 
 📝 **Exemples:** {' → '.join(examples)}
 
@@ -1119,13 +1234,11 @@ async def main():
 
     try:
         while True:
-            # Vérifie l'arrêt temporaire
             if bot_state['is_stopped']:
                 if bot_state['stop_end'] and datetime.now() >= bot_state['stop_end']:
                     logger.info("⏰ Fin programmée de l'arrêt temporaire")
                     await stop_temporary_stop()
             
-            # Vérifie la pause normale
             elif bot_state['is_paused']:
                 await check_pause()
             
@@ -1133,7 +1246,6 @@ async def main():
     except KeyboardInterrupt:
         logger.info("👋 Arrêt")
     finally:
-        # Nettoyage
         if bot_state['joke_task']:
             bot_state['joke_task'].cancel()
         await client.disconnect()

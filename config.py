@@ -6,11 +6,11 @@ API_ID = 29177661
 API_HASH = "a8639172fa8d35dbfd8ea46286d349ab"
 
 # Bot Token - PEUT ETRE CHANGE VIA VARIABLE D'ENVIRONNEMENT RENDER
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7815360317:AAGsrFzeUZrHOjujf5aY2UjlBj4GOblHSig')
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7573497633:AAHk9K15yTCiJP-zruJrc9v8eK8I9XhjyH4)
 
 # IDs des canaux (fixes)
 SOURCE_CHANNEL_ID = -1002682552255      # Canal source ou on recoit les numeros
-PREDICTION_CHANNEL_ID = -1003430118891  # Canal ou on envoie les predictions
+PREDICTION_CHANNEL_ID = -1003814088712  # Canal ou on envoie les predictions
 ADMIN_ID = 1190237801                   # ID de l'admin pour les notifications
 
 # Configuration serveur
